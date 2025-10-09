@@ -237,34 +237,40 @@ class TimeExpressionParser {
     }
 
     chineseToNumber(chinese) {
-        const basicMap = {
+        const numMap = {
             '零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
-            '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
-            '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
-            '十六': 16, '十七': 17, '十八': 18, '十九': 19,
-            '二十': 20, '三十': 30, '日': 7, '天': 7
+            '六': 6, '七': 7, '八': 8, '九': 9,
+            '日': 7, '天': 7 // 特殊映射
         };
-        
-        // 先检查是否在基础映射中
-        if (basicMap[chinese] !== undefined) {
-            return basicMap[chinese];
+
+        if (numMap[chinese] !== undefined) {
+            return numMap[chinese];
         }
-        
-        // 处理"二十一"到"三十九"这样的复合数字
+
+        if (chinese === '十') return 10;
+
+        // 处理 "十一" 到 "九十九"
         if (chinese.includes('十')) {
-            // "二十一" -> ["二", "一"]
             const parts = chinese.split('十');
-            if (parts.length === 2) {
-                let tens = 10; // 默认"十"
-                if (parts[0] === '二') tens = 20;
-                else if (parts[0] === '三') tens = 30;
-                
-                const ones = basicMap[parts[1]] || 0;
-                return tens + ones;
+            const tensPart = parts[0];
+            const onesPart = parts[1];
+
+            let total = 0;
+
+            if (tensPart === '') { // "十"开头, e.g., "十三"
+                total = 10;
+            } else { // "二"开头, e.g., "二十三"
+                total = (numMap[tensPart] || 1) * 10;
             }
+
+            if (onesPart) { // e.g., "二十三" 的 "三"
+                total += numMap[onesPart] || 0;
+            }
+            
+            return total;
         }
-        
-        return parseInt(chinese) || 0;
+
+        return parseInt(chinese, 10) || 0;
     }
 }
 
@@ -901,22 +907,6 @@ class RAGDiaryPlugin {
     //## Time-Aware RAG Logic - 时间感知RAG逻辑
     //####################################################################################
 
-    async processWithTimeFilter(dbName, queryVector, timeRange, k) {
-        console.log(`[RAGDiaryPlugin] Processing time-aware search for "${dbName}"`);
-        console.log(`[RAGDiaryPlugin] Time range: ${timeRange.start.toISOString()} to ${timeRange.end.toISOString()}`);
-        
-        // Step 1: 获取RAG检索结果
-        const ragResults = await this.vectorDBManager.search(dbName, queryVector, k);
-        console.log(`[RAGDiaryPlugin] RAG search returned ${ragResults.length} results`);
-        
-        // Step 2: 获取时间范围内的日记
-        const timeResults = await this.getTimeRangeDiaries(dbName, timeRange);
-        console.log(`[RAGDiaryPlugin] Time range search found ${timeResults.length} entries`);
-        
-        // Step 3: 智能融合结果
-        return this.mergeResults(ragResults, timeResults);
-    }
-
     async getTimeRangeDiaries(dbName, timeRange) {
         const characterDirPath = path.join(dailyNoteRootPath, dbName);
         let diariesInRange = [];
@@ -966,43 +956,6 @@ class RAGDiaryPlugin {
         return diariesInRange;
     }
 
-    mergeResults(ragResults, timeResults) {
-        const maxTotal = 30; // 总结果上限
-
-        // 确保RAG结果优先被包含 (取前40%或至少几个)
-        const guaranteedRAGCount = Math.min(ragResults.length, Math.max(5, Math.floor(maxTotal * 0.4)));
-        const guaranteedRAG = ragResults.slice(0, guaranteedRAGCount);
-        
-        // 剩余配额给时间结果
-        const remainingQuota = maxTotal - guaranteedRAG.length;
-        
-        // 时间结果去重 (排除内容完全相同的)
-        const uniqueTimeResults = timeResults.filter(tr =>
-            !guaranteedRAG.some(rr => rr.text.trim() === tr.text.trim())
-        );
-        
-        // 按时间新旧排序，取最新的
-        const selectedTimeResults = uniqueTimeResults
-            .sort((a, b) => new Date(b.date) - new Date(a.date))
-            .slice(0, remainingQuota);
-        
-        // 组合并标记来源
-        const finalResults = [
-            ...guaranteedRAG.map(r => ({...r, source: 'rag'})),
-            ...selectedTimeResults
-        ];
-        
-        return {
-            results: finalResults,
-            stats: {
-                ragCount: guaranteedRAG.length,
-                timeCount: selectedTimeResults.length,
-                totalCount: finalResults.length,
-                timeRangeTotal: timeResults.length
-            }
-        };
-    }
-
     formatStandardResults(searchResults, displayName) {
         let content = `\n[--- 从"${displayName}"中检索到的相关记忆片段 ---]\n`;
         if (searchResults && searchResults.length > 0) {
@@ -1011,50 +964,6 @@ class RAGDiaryPlugin {
             content += "没有找到直接相关的记忆片段。";
         }
         content += `\n[--- 记忆片段结束 ---]\n`;
-        return content;
-    }
-
-    formatTimeAwareResults(resultsData, dbName, timeRange) {
-        const { results, stats } = resultsData;
-        const displayName = dbName + '日记本';
-
-        const formatDate = (date) => {
-            const d = new Date(date);
-            return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-        }
-    
-        let content = `\n[--- "${displayName}" 时间感知检索结果 ---]\n`;
-        content += `[时间范围: ${formatDate(timeRange.start)} 至 ${formatDate(timeRange.end)}]\n`;
-        content += `[统计: RAG相关 ${stats.ragCount}条 | 时间范围 ${stats.timeCount}条 | 共 ${stats.totalCount}条`;
-    
-        if (stats.timeRangeTotal > stats.timeCount) {
-            content += ` | 该时间段共有${stats.timeRangeTotal}条，已精选最新】\n`;
-        } else {
-            content += `]\n`;
-        }
-        content += '\n';
-    
-        const ragEntries = results.filter(e => e.source === 'rag');
-        const timeEntries = results.filter(e => e.source === 'time');
-    
-        if (ragEntries.length > 0) {
-            content += '【语义相关记忆】\n';
-            ragEntries.forEach(entry => {
-                // 尝试从文本中提取日期
-                const dateMatch = entry.text.match(/^\[(\d{4}-\d{2}-\d{2})\]/);
-                const datePrefix = dateMatch ? `[${dateMatch[1]}] ` : '';
-                content += `* ${datePrefix}${entry.text.replace(/^\[.*?\]\s*-\s*.*?\n?/, '').trim()}\n`;
-            });
-        }
-    
-        if (timeEntries.length > 0) {
-            content += '\n【时间范围记忆】\n';
-            timeEntries.forEach(entry => {
-                content += `* [${entry.date}] ${entry.text.replace(/^\[.*?\]\s*-\s*.*?\n?/, '').trim()}\n`;
-            });
-        }
-    
-        content += `[--- 检索结束 ---]\n`;
         return content;
     }
 
