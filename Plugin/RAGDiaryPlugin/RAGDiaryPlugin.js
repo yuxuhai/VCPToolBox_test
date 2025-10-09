@@ -615,6 +615,11 @@ class RAGDiaryPlugin {
             }
         }
 
+        // V3.5: 为 VCP Info 创建一个更清晰的组合查询字符串
+        const combinedQueryForDisplay = aiContent
+            ? `[AI]: ${aiContent}\n[User]: ${userContent}`
+            : userContent;
+
         const userVector = userContent ? await this.getSingleEmbedding(userContent) : null;
         const aiVector = aiContent ? await this.getSingleEmbedding(aiContent) : null;
 
@@ -653,6 +658,7 @@ class RAGDiaryPlugin {
                 systemMessage.content,
                 queryVector,
                 userContent, // 传递 userContent 用于语义组和时间解析
+                combinedQueryForDisplay, // V3.5: 传递组合后的查询字符串用于广播
                 dynamicK,
                 timeRanges
             );
@@ -664,7 +670,7 @@ class RAGDiaryPlugin {
     }
 
     // V3.0 新增: 处理单条 system 消息内容的辅助函数
-    async _processSingleSystemMessage(content, queryVector, userContent, dynamicK, timeRanges) {
+    async _processSingleSystemMessage(content, queryVector, userContent, combinedQueryForDisplay, dynamicK, timeRanges) {
         if (!this.pushVcpInfo) {
             console.warn('[RAGDiaryPlugin] _processSingleSystemMessage: pushVcpInfo is null. Cannot broadcast RAG details.');
         }
@@ -775,7 +781,7 @@ class RAGDiaryPlugin {
                     const infoData = {
                         type: 'RAG_RETRIEVAL_DETAILS',
                         dbName: dbName,
-                        query: userContent,
+                        query: combinedQueryForDisplay,
                         k: finalK,
                         useTime: useTime,
                         useGroup: useGroup,
@@ -881,7 +887,7 @@ class RAGDiaryPlugin {
                         const infoData = {
                             type: 'RAG_RETRIEVAL_DETAILS',
                             dbName: dbName,
-                            query: userContent,
+                            query: combinedQueryForDisplay,
                             k: finalK,
                             useTime: false,
                             useGroup: false,
