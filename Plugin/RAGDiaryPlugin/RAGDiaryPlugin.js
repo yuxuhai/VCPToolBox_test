@@ -641,7 +641,7 @@ class RAGDiaryPlugin {
 
         let queryVector = null;
         if (aiVector && userVector) {
-            queryVector = this._getWeightedAverageVector([userVector, aiVector], [0.7, 0.3]);
+            queryVector = this._getWeightedAverageVector([userVector, aiVector], [0.85, 0.15]);
         } else {
             queryVector = userVector || aiVector;
         }
@@ -1104,11 +1104,11 @@ class RAGDiaryPlugin {
                         // 计算结果向量的平均值
                         const avgResultVector = this._getAverageVector(resultVectors);
                         
-                        // 融合：上下文向量40% + 当前结果向量60%
+                        // 融合：上下文向量60% + 当前结果向量40%
                         // 这让推理既保持与原始问题的关联，又能递进到下一层思考
                         currentQueryVector = this._getWeightedAverageVector(
                             [queryVector, avgResultVector],
-                            [0.4, 0.6]
+                            [0.8, 0.2]
                         );
                         
                         console.log(`[RAGDiaryPlugin][MetaThinking] 向量已融合，准备进入下一阶段`);
