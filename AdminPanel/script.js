@@ -1497,7 +1497,17 @@ Description Length: ${newDescription.length}`);
             easyMDE = new EasyMDE({
                 element: noteContentEditorTextarea,
                 spellChecker: false,
-                // 在这里可以添加更多配置选项
+                sideBySideFullscreen: false,
+                status: ['lines', 'words', 'cursor'],
+                toolbar: ["bold", "italic", "heading", "|", "quote", "unordered-list", "ordered-list", "|", "link", "image", "|", "preview", "side-by-side", "fullscreen", "|", "guide"],
+                previewClass: ['editor-preview', 'custom-preview'],
+                previewRender: function(plainText, preview) {
+                    // 使用 EasyMDE 自带的 markdown 渲染
+                    setTimeout(function() {
+                        preview.innerHTML = easyMDE.markdown(plainText);
+                    }, 1);
+                    return "Loading...";
+                }
             });
 
             document.getElementById('notes-list-view').style.display = 'none';
