@@ -7,7 +7,25 @@
     <link rel="stylesheet" href="style.css">
     <link rel="stylesheet" href="woff.css">
     <link rel="icon" href="favicon.ico">
+    <!-- EasyMDE for Markdown Editing -->
+    <link rel="stylesheet" href="https://unpkg.com/easymde/dist/easymde.min.css">
+    <script src="https://unpkg.com/easymde/dist/easymde.min.js"></script>
    <style>
+        .editor-toolbar {
+            background-color: var(--background-color-light);
+            border-color: var(--border-color);
+        }
+        .CodeMirror {
+            background-color: var(--background-color);
+            color: var(--text-color-primary);
+            border-color: var(--border-color) !important;
+        }
+        .CodeMirror-cursor {
+            border-left-color: var(--text-color-primary) !important;
+        }
+        .editor-preview, .editor-preview-side {
+            background-color: var(--background-color-light) !important;
+        }
        .draggable-list {
            list-style: none;
            padding: 0;

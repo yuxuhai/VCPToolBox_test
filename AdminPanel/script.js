@@ -1280,6 +1280,7 @@ Description Length: ${newDescription.length}`);
     // --- Daily Notes Manager Functions ---
     let currentNotesFolder = null;
     let selectedNotes = new Set();
+    let easyMDE = null; // 用于存储EasyMDE实例
 
     async function initializeDailyNotesManager() {
         console.log('Initializing Daily Notes Manager...');
@@ -1483,8 +1484,22 @@ Description Length: ${newDescription.length}`);
             const data = await apiFetch(`${API_BASE_URL}/dailynotes/note/${folderName}/${fileName}`);
             editingNoteFolderInput.value = folderName;
             editingNoteFileInput.value = fileName;
+            
+            // 销毁旧的EasyMDE实例（如果存在）
+            if (easyMDE) {
+                easyMDE.toTextArea();
+                easyMDE = null;
+            }
+            
             noteContentEditorTextarea.value = data.content;
             
+            // 初始化EasyMDE
+            easyMDE = new EasyMDE({
+                element: noteContentEditorTextarea,
+                spellChecker: false,
+                // 在这里可以添加更多配置选项
+            });
+
             document.getElementById('notes-list-view').style.display = 'none';
             document.querySelector('.notes-sidebar').style.display = 'none'; // Hide sidebar too
             document.querySelector('.notes-toolbar').style.display = 'none';
@@ -1499,7 +1514,7 @@ Description Length: ${newDescription.length}`);
     async function saveNoteChanges() {
         const folderName = editingNoteFolderInput.value;
         const fileName = editingNoteFileInput.value;
-        const content = noteContentEditorTextarea.value;
+        const content = easyMDE.value(); // 从EasyMDE获取内容
 
         if (!folderName || !fileName) {
             showMessage('无法保存日记，缺少文件信息。', 'error');
@@ -1523,6 +1538,11 @@ Description Length: ${newDescription.length}`);
     }
 
     function closeNoteEditor() {
+        // 销毁EasyMDE实例
+        if (easyMDE) {
+            easyMDE.toTextArea();
+            easyMDE = null;
+        }
         noteEditorAreaDiv.style.display = 'none';
         editingNoteFolderInput.value = '';
         editingNoteFileInput.value = '';
