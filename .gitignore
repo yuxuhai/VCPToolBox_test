@@ -143,6 +143,8 @@ Plugin/ImageProcessor/image_cache.json
 Plugin/WeatherReporter/weather_cache.txt
 DebugLog/
 dailynote/
+# But allow examples directory
+!dailynote/examples/
 
 # WeatherReporter cache files
 Plugin/WeatherReporter/city_cache.txt
