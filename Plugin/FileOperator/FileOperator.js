@@ -132,9 +132,21 @@ function resolveAndNormalizePath(inputPath) {
     return inputPath; // Return as-is if invalid input
   }
 
-  let normalizedPath = inputPath.trim();
+  const originalPath = inputPath.trim();
 
-  // Don't modify absolute paths
+  // Sanitize each component of the path to remove leading/trailing spaces.
+  const parts = originalPath.split(/[/\\]+/);
+  const trimmedParts = parts.map(part => part.trim());
+  let normalizedPath = path.join(...trimmedParts);
+  
+  // After sanitization, path.join might have turned an absolute path relative.
+  // e.g., "/a/b" -> "a/b". We need to restore the root if it was there.
+  if (path.isAbsolute(originalPath) && !path.isAbsolute(normalizedPath)) {
+      const root = path.parse(originalPath).root;
+      normalizedPath = path.join(root, normalizedPath);
+  }
+
+  // Don't modify absolute paths further
   if (path.isAbsolute(normalizedPath)) {
     return path.normalize(normalizedPath);
   }
