@@ -64,6 +64,10 @@
         "description": "功能: 将内容写入指定文件。如果目标路径已存在同名文件，它不会覆盖，而是自动在文件名后添加序号来创建新文件（例如，将 'file.txt' 创建为 'file(1).txt'），并会在返回结果中告知AI新的文件名。这确保了不会意外丢失数据。\n参数:\n- filePath (字符串, 必需): 要写入的文件的绝对路径。\n- content (字符串, 必需): 要写入文件的内容，支持多行。\n- encoding (字符串, 可选, 默认'utf8'): 写入时使用的文件编码。\n调用格式:\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」FileOperator「末」,\ncommand:「始」WriteFile「末」,\nfilePath:「始」/path/to/your/file.txt「末」,\ncontent:「始」这是要写入的新内容。\n这是第二行。\n「末」\n<<<[END_TOOL_REQUEST]>>>"
       },
       {
+        "command": "WriteEscapedFile",
+        "description": "功能: 专用于写入内容本身包含VCP标准始末界定符「始」和「末」的文件，特别是用于生成plugin-manifest.json。此命令会先将内容中的特殊转义界定符「始exp」和「末exp」替换为标准的「始」和「末」，然后再写入文件。当AI需要生成一个包含调用示例的插件描述文件时，必须使用此命令以避免解析错误。\n参数:\n- filePath (字符串, 必需): 要写入的文件的绝对路径。\n- content (字符串, 必需): 要写入文件的内容，其中应使用「始exp」和「末exp」代替「始」和「末」。\n- encoding (字符串, 可选, 默认'utf8'): 写入时使用的文件编码。\n调用格式:\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」FileOperator「末」,\ncommand:「始」WriteEscapedFile「末」,\nfilePath:「始」/path/to/new_plugin/plugin-manifest.json「末」,\ncontent:「始」{\n  \"description\": \"...调用格式:\\n<<<[TOOL_REQUEST]>>>\\ntool_name:「始exp」MyNewPlugin「末exp」,\\n...\\n<<<[END_TOOL_REQUEST]>>>\"\n}「末」\n<<<[END_TOOL_REQUEST]>>>"
+      },
+      {
         "command": "AppendFile",
         "description": "功能: 将内容追加到指定文件的末尾。如果文件不存在，则会创建新文件。\n参数:\n- filePath (字符串, 必需): 要追加内容的文件的绝对路径。\n- content (字符串, 必需): 要追加的内容。\n- encoding (字符串, 可选, 默认'utf8'): 追加时使用的文件编码。\n调用格式:\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」FileOperator「末」,\ncommand:「始」AppendFile「末」,\nfilePath:「始」/path/to/your/log.txt「末」,\ncontent:「始」\n--- 新的日志条目 ---\n「末」\n<<<[END_TOOL_REQUEST]>>>"
       },

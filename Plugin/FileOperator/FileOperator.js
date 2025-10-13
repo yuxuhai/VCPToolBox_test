@@ -6,7 +6,6 @@ const { minimatch } = require('minimatch');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
 const ExcelJS = require('exceljs');
-const trash = require('trash');
 const axios = require('axios');
 
 // Load environment variables
@@ -127,6 +126,29 @@ function applyDiffLogic(originalContent, diffContent) {
 
   return modifiedContent;
 }
+
+function resolveAndNormalizePath(inputPath) {
+  if (!inputPath || typeof inputPath !== 'string') {
+    return inputPath; // Return as-is if invalid input
+  }
+
+  let normalizedPath = inputPath.trim();
+
+  // Don't modify absolute paths
+  if (path.isAbsolute(normalizedPath)) {
+    return path.normalize(normalizedPath);
+  }
+
+  // If it's a relative path that doesn't go "up", assume it's from the project root.
+  if (!normalizedPath.startsWith('../') && !normalizedPath.startsWith('./')) {
+    normalizedPath = path.join(__dirname, '..', '..', normalizedPath);
+  } else {
+    // If it already has relative navigators, resolve it from the current script's location.
+    normalizedPath = path.resolve(__dirname, normalizedPath);
+  }
+  
+  return normalizedPath;
+}
  
 // File operation functions
 async function webReadFile(fileUrl) {
@@ -180,6 +202,7 @@ async function webReadFile(fileUrl) {
 
 async function readFile(filePath, encoding = 'utf8') {
   try {
+    filePath = resolveAndNormalizePath(filePath);
     debugLog('Reading file', { filePath, encoding });
 
     if (!isPathAllowed(filePath, 'ReadFile')) {
@@ -289,6 +312,7 @@ async function readFile(filePath, encoding = 'utf8') {
 
 async function writeFile(filePath, content, encoding = 'utf8') {
   try {
+    filePath = resolveAndNormalizePath(filePath);
     debugLog('Writing file', { filePath, contentLength: content.length, encoding });
 
     if (!isPathAllowed(filePath, 'WriteFile')) {
@@ -328,9 +352,28 @@ async function writeFile(filePath, content, encoding = 'utf8') {
     };
   }
 }
+async function writeEscapedFile(filePath, content, encoding = 'utf8') {
+  filePath = resolveAndNormalizePath(filePath);
+  debugLog('Writing file with escaped delimiters', { filePath, contentLength: content.length });
+  // Replace the escaped delimiters with the actual ones
+  const processedContent = content.replace(/「始exp」/g, '「始」').replace(/「末exp」/g, '「末」');
+  
+  // Delegate the actual writing to the original writeFile function
+  // This reuses all the safety checks, unique file naming, etc.
+  const result = await writeFile(filePath, processedContent, encoding);
+  
+  // Optionally, modify the success message to be more specific
+  if (result.success) {
+    result.data.message = `文件内容已转义处理，并成功写入。详情: ${result.data.message}`;
+  }
+  
+  return result;
+}
+
 
 async function appendFile(filePath, content, encoding = 'utf8') {
   try {
+    filePath = resolveAndNormalizePath(filePath);
     debugLog('Appending to file', { filePath, contentLength: content.length, encoding });
 
     if (!isPathAllowed(filePath, 'AppendFile')) {
@@ -374,6 +417,7 @@ async function appendFile(filePath, content, encoding = 'utf8') {
 
 async function editFile(filePath, content, encoding = 'utf8') {
   try {
+    filePath = resolveAndNormalizePath(filePath);
     debugLog('Editing file', { filePath, contentLength: content.length, encoding });
 
     if (!isPathAllowed(filePath, 'EditFile')) {
@@ -421,6 +465,7 @@ async function editFile(filePath, content, encoding = 'utf8') {
 
 async function listDirectory(dirPath, showHidden = ENABLE_HIDDEN_FILES) {
   try {
+    dirPath = resolveAndNormalizePath(dirPath);
     debugLog('Listing directory', { dirPath, showHidden });
 
     if (!isPathAllowed(dirPath, 'ListDirectory')) {
@@ -474,6 +519,7 @@ async function listDirectory(dirPath, showHidden = ENABLE_HIDDEN_FILES) {
 
 async function getFileInfo(filePath) {
   try {
+    filePath = resolveAndNormalizePath(filePath);
     debugLog('Getting file info', { filePath });
 
     if (!isPathAllowed(filePath, 'FileInfo')) {
@@ -512,6 +558,8 @@ async function getFileInfo(filePath) {
 
 async function copyFile(sourcePath, destinationPath) {
   try {
+    sourcePath = resolveAndNormalizePath(sourcePath);
+    destinationPath = resolveAndNormalizePath(destinationPath);
     debugLog('Copying file', { sourcePath, destinationPath });
 
     if (!isPathAllowed(sourcePath, 'CopyFile') || !isPathAllowed(destinationPath, 'CopyFile')) {
@@ -557,6 +605,8 @@ async function copyFile(sourcePath, destinationPath) {
 
 async function moveFile(sourcePath, destinationPath) {
   try {
+    sourcePath = resolveAndNormalizePath(sourcePath);
+    destinationPath = resolveAndNormalizePath(destinationPath);
     debugLog('Moving file', { sourcePath, destinationPath });
 
     if (!isPathAllowed(sourcePath, 'MoveFile') || !isPathAllowed(destinationPath, 'MoveFile')) {
@@ -595,6 +645,8 @@ async function moveFile(sourcePath, destinationPath) {
 
 async function renameFile(sourcePath, destinationPath) {
   try {
+    sourcePath = resolveAndNormalizePath(sourcePath);
+    destinationPath = resolveAndNormalizePath(destinationPath);
     debugLog('Renaming file', { sourcePath, destinationPath });
 
     if (!isPathAllowed(sourcePath, 'RenameFile') || !isPathAllowed(destinationPath, 'RenameFile')) {
@@ -640,6 +692,7 @@ async function renameFile(sourcePath, destinationPath) {
 
 async function deleteFile(filePath) {
   try {
+    filePath = resolveAndNormalizePath(filePath);
     debugLog('Deleting file', { filePath });
 
     if (!isPathAllowed(filePath, 'DeleteFile')) {
@@ -654,6 +707,8 @@ async function deleteFile(filePath) {
       type: stats.isDirectory() ? 'directory' : 'file',
     };
 
+    // Dynamically import the trash module which is ESM-only
+    const { default: trash } = await import('trash');
     await trash(filePath);
 
     return {
@@ -674,6 +729,7 @@ async function deleteFile(filePath) {
 
 async function createDirectory(dirPath) {
   try {
+    dirPath = resolveAndNormalizePath(dirPath);
     debugLog('Creating directory', { dirPath });
 
     if (!isPathAllowed(dirPath, 'CreateDirectory')) {
@@ -702,6 +758,7 @@ async function createDirectory(dirPath) {
 
 async function searchFiles(searchPath, pattern, options = {}) {
   try {
+    searchPath = resolveAndNormalizePath(searchPath);
     debugLog('Searching files', { searchPath, pattern, options });
 
     if (!isPathAllowed(searchPath, 'SearchFiles')) {
@@ -929,6 +986,7 @@ async function createCanvas(fileName, content, encoding = 'utf8') {
 
 async function updateHistory(filePath, searchString, replaceString, encoding = 'utf8') {
   try {
+    filePath = resolveAndNormalizePath(filePath);
     debugLog('Updating history file', { filePath, searchString, replaceString });
 
     if (!isPathAllowed(filePath, 'UpdateHistory')) {
@@ -1033,6 +1091,12 @@ async function processBatchRequest(request) {
         case 'DeleteFile':
           result = await deleteFile(parameters.filePath);
           break;
+        case 'CreateDirectory':
+          result = await createDirectory(parameters.directoryPath);
+          break;
+        case 'WriteFile':
+          result = await writeFile(parameters.filePath, parameters.content);
+          break;
         default:
           result = { success: false, error: `Unsupported batch command: ${command}` };
       }
@@ -1103,6 +1167,8 @@ async function processRequest(request) {
       return await webReadFile(parameters.url || parameters.filePath);
     case 'WriteFile':
       return await writeFile(parameters.filePath, parameters.content, parameters.encoding);
+    case 'WriteEscapedFile':
+      return await writeEscapedFile(parameters.filePath, parameters.content, parameters.encoding);
     case 'AppendFile':
       return await appendFile(parameters.filePath, parameters.content, parameters.encoding);
     case 'EditFile':
