@@ -134,32 +134,33 @@ function resolveAndNormalizePath(inputPath) {
 
   const originalPath = inputPath.trim();
 
-  // Sanitize each component of the path to remove leading/trailing spaces.
+  // 1. Sanitize each component of the path to remove leading/trailing spaces.
   const parts = originalPath.split(/[/\\]+/);
   const trimmedParts = parts.map(part => part.trim());
-  let normalizedPath = path.join(...trimmedParts);
+  const sanitizedPath = path.join(...trimmedParts);
   
-  // After sanitization, path.join might have turned an absolute path relative.
-  // e.g., "/a/b" -> "a/b". We need to restore the root if it was there.
-  if (path.isAbsolute(originalPath) && !path.isAbsolute(normalizedPath)) {
-      const root = path.parse(originalPath).root;
-      normalizedPath = path.join(root, normalizedPath);
+  // 2. Handle absolute paths. Check originalPath as sanitizing might alter it.
+  if (path.isAbsolute(originalPath)) {
+      // On Windows, path.join(['', 'foo']) becomes '\\foo'.
+      // path.resolve correctly handles this, ensuring a drive letter.
+      return path.resolve(sanitizedPath);
   }
 
-  // Don't modify absolute paths further
-  if (path.isAbsolute(normalizedPath)) {
-    return path.normalize(normalizedPath);
-  }
+  // 3. Handle all relative paths.
+  const normalized = path.normalize(sanitizedPath);
+  
+  // Check if the path starts with './' or '../' in an OS-agnostic way.
+  const startsWithDot = normalized.startsWith(`.${path.sep}`);
+  const startsWithDotDot = normalized.startsWith(`..${path.sep}`);
 
-  // If it's a relative path that doesn't go "up", assume it's from the project root.
-  if (!normalizedPath.startsWith('../') && !normalizedPath.startsWith('./')) {
-    normalizedPath = path.join(__dirname, '..', '..', normalizedPath);
+  if (!startsWithDot && !startsWithDotDot) {
+    // Path is like 'foo/bar', so treat it as relative to the project root.
+    // The project root is two levels up from this script's directory.
+    return path.resolve(__dirname, '..', '..', normalized);
   } else {
-    // If it already has relative navigators, resolve it from the current script's location.
-    normalizedPath = path.resolve(__dirname, normalizedPath);
+    // Path is like './foo' or '../foo', so it's explicitly relative to this script's directory.
+    return path.resolve(__dirname, normalized);
   }
-  
-  return normalizedPath;
 }
  
 // File operation functions
@@ -368,7 +369,12 @@ async function writeEscapedFile(filePath, content, encoding = 'utf8') {
   filePath = resolveAndNormalizePath(filePath);
   debugLog('Writing file with escaped delimiters', { filePath, contentLength: content.length });
   // Replace the escaped delimiters with the actual ones
-  const processedContent = content.replace(/「始exp」/g, '「始」').replace(/「末exp」/g, '「末」');
+  // Replace all escaped delimiters with the actual ones
+  const processedContent = content
+    .replace(/「始exp」/g, '「始」')
+    .replace(/「末exp」/g, '「末」')
+    .replace(/<<<\[TOOL_REQUEST_EXP\]>>>/g, '<<<[TOOL_REQUEST]>>>')
+    .replace(/<<<\[END_TOOL_REQUEST_EXP\]>>>/g, '<<<[END_TOOL_REQUEST]>>>');
   
   // Delegate the actual writing to the original writeFile function
   // This reuses all the safety checks, unique file naming, etc.
