@@ -1,0 +1,84 @@
+【代码重构】
+在不改变外部行为下改善代码结构
+
+重构动机：
+• 提高可读性
+• 消除重复
+• 简化复杂逻辑
+• 改善设计
+
+何时重构：
+→ 添加新功能前
+→ 修复Bug时
+→ Code Review时
+→ 技术债务累积
+
+重构手法：
+1. 提取函数
+   ```javascript
+   // Before
+   function printOwing() {
+     console.log('*****');
+     console.log(`name: ${name}`);
+     console.log(`amount: ${amount}`);
+   }
+   
+   // After
+   function printOwing() {
+     printBanner();
+     printDetails(name, amount);
+   }
+   ```
+
+2. 内联函数
+   - 函数过于简单
+   - 直接使用
+
+3. 提取变量
+   ```javascript
+   // Before
+   if (platform.toUpperCase().indexOf("MAC") > -1 &&
+       browser.toUpperCase().indexOf("IE") > -1) {
+   }
+   
+   // After
+   const isMac = platform.toUpperCase().indexOf("MAC") > -1;
+   const isIE = browser.toUpperCase().indexOf("IE") > -1;
+   if (isMac && isIE) {}
+   ```
+
+4. 重命名
+   - 更清晰的命名
+   - 揭示意图
+
+5. 封装变量
+   - 用getter/setter
+
+6. 引入参数对象
+   - 多个参数→对象
+
+7. 拆分阶段
+   - 复杂逻辑分步骤
+
+代码坏味道：
+✗ 重复代码
+✗ 过长函数
+✗ 过大类
+✗ 过长参数列表
+✗ 发散式变化
+✗ 霰弹式修改
+✗ 依恋情结
+✗ 数据泥团
+✗ 基本类型偏执
+✗ 冗余类
+
+重构原则：
+✓ 小步前进
+✓ 频繁测试
+✓ 保持功能不变
+✓ 提交独立重构
+
+输出：
+- 重构计划：[重构什么]
+- 重构手法：[如何重构]
+- 测试保障：[如何验证]

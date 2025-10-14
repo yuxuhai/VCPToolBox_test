@@ -1,0 +1,87 @@
+【自动化测试】
+构建持续测试流程
+
+自动化测试价值：
+• 快速反馈
+• 回归测试
+• 持续集成
+• 减少人工
+
+测试金字塔：
+```
+        /\
+       /E2E\       少：端到端测试
+      /------\
+     /Integration\ 中：集成测试
+    /------------\
+   /  Unit Tests  \ 多：单元测试
+  /----------------\
+```
+
+测试策略：
+• 单元测试：70%
+  - 快速
+  - 独立
+  - 低成本
+
+• 集成测试：20%
+  - 关键路径
+  - 接口契约
+
+• E2E测试：10%
+  - 核心业务流程
+  - 用户关键场景
+
+CI/CD集成：
+```yaml
+# GitHub Actions示例
+name: Test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-node@v2
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:e2e
+      - name: Upload coverage
+        uses: codecov/codecov-action@v2
+```
+
+测试数据管理：
+• 测试夹具(Fixtures)
+  - 预定义数据
+  - 可复用
+  - 版本控制
+
+• 工厂模式
+  ```javascript
+  const userFactory = {
+    create: (overrides = {}) => ({
+      id: Math.random(),
+      username: 'testuser',
+      email: 'test@example.com',
+      ...overrides
+    })
+  };
+  ```
+
+测试环境管理：
+→ 本地环境：开发测试
+→ CI环境：自动化测试
+→ 测试环境：集成测试
+→ 预发布环境：E2E测试
+
+测试报告：
+• 覆盖率报告
+• 测试结果
+• 失败详情
+• 趋势分析
+
+输出：
+- 自动化策略：[什么自动化]
+- CI配置：[如何集成]
+- 测试数据：[数据管理]
+- 报告分析：[结果反馈]

@@ -1,0 +1,72 @@
+【集成测试】
+测试模块间协作
+
+集成测试定义：
+测试多个模块组合后的行为
+
+测试范围：
+• API接口测试
+  - HTTP请求/响应
+  - 状态码验证
+  - 数据格式检查
+
+• 数据库集成
+  - 读写操作
+  - 事务处理
+  - 数据一致性
+
+• 外部服务
+  - 第三方API
+  - 消息队列
+  - 缓存服务
+
+测试策略：
+→ 自顶向下：从接口入手
+→ 自底向上：从数据层开始
+→ 大爆炸：一次性集成
+
+测试环境：
+• 测试数据库
+  - 独立实例
+  - 测试数据
+  - 自动清理
+
+• Docker容器
+  - 隔离环境
+  - 快速启动
+  - 一致性保证
+
+示例：
+```javascript
+describe('POST /api/users', () => {
+  it('应该创建用户并返回201', async () => {
+    const userData = {
+      username: 'testuser',
+      email: 'test@example.com'
+    };
+    
+    const response = await request(app)
+      .post('/api/users')
+      .send(userData)
+      .expect(201);
+    
+    expect(response.body.data).toHaveProperty('id');
+    expect(response.body.data.username).toBe(userData.username);
+    
+    // 验证数据库
+    const user = await User.findById(response.body.data.id);
+    expect(user).toBeTruthy();
+  });
+});
+```
+
+注意事项：
+✓ 测试数据隔离
+✓ 幂等性
+✓ 清理副作用
+✗ 依赖外部环境
+
+输出：
+- 测试场景：[集成点]
+- 环境配置：[测试环境]
+- 数据准备：[测试数据]
