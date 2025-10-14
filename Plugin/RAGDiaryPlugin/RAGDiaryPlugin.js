@@ -848,111 +848,102 @@ class RAGDiaryPlugin {
             }
         }
 
-        // --- 1. 处理 [[...]] RAG 片段检索 ---
+        // --- 并行处理所有 RAG、全文和混合模式的占位符 ---
+        const processingPromises = [];
+
+        // --- 1. 准备 [[...]] RAG 片段检索任务 ---
         for (const match of ragDeclarations) {
             const placeholder = match[0];
             const dbName = match[1];
             if (processedDiaries.has(dbName)) {
                 console.warn(`[RAGDiaryPlugin] Detected circular reference to "${dbName}" in [[...]]. Skipping.`);
-                processedContent = processedContent.replace(placeholder, `[检测到循环引用，已跳过“${dbName}日记本”的解析]`);
+                processingPromises.push(Promise.resolve({ placeholder, content: `[检测到循环引用，已跳过“${dbName}日记本”的解析]` }));
                 continue;
             }
-            processedDiaries.add(dbName); // 标记为已处理
+            processedDiaries.add(dbName);
 
-            const modifiers = match[2] || '';
-            const retrievedContent = await this._processRAGPlaceholder({
-                dbName,
-                modifiers,
-                queryVector,
-                userContent,
-                combinedQueryForDisplay,
-                dynamicK,
-                timeRanges,
-                allowTimeAndGroup: true
-            });
-            
-            processedContent = processedContent.replace(placeholder, retrievedContent);
+            processingPromises.push((async () => {
+                const modifiers = match[2] || '';
+                const retrievedContent = await this._processRAGPlaceholder({
+                    dbName, modifiers, queryVector, userContent, combinedQueryForDisplay,
+                    dynamicK, timeRanges, allowTimeAndGroup: true
+                });
+                return { placeholder, content: retrievedContent };
+            })());
         }
 
-        // --- 2. 处理 <<...>> RAG 全文检索 ---
+        // --- 2. 准备 <<...>> RAG 全文检索任务 ---
         for (const match of fullTextDeclarations) {
             const placeholder = match[0];
             const dbName = match[1];
             if (processedDiaries.has(dbName)) {
                 console.warn(`[RAGDiaryPlugin] Detected circular reference to "${dbName}" in <<...>>. Skipping.`);
-                processedContent = processedContent.replace(placeholder, `[检测到循环引用，已跳过“${dbName}日记本”的解析]`);
+                processingPromises.push(Promise.resolve({ placeholder, content: `[检测到循环引用，已跳过“${dbName}日记本”的解析]` }));
                 continue;
             }
-            processedDiaries.add(dbName); // 标记为已处理
+            processedDiaries.add(dbName);
 
-            const diaryConfig = this.ragConfig[dbName] || {};
-            const localThreshold = diaryConfig.threshold || GLOBAL_SIMILARITY_THRESHOLD;
+            processingPromises.push((async () => {
+                const diaryConfig = this.ragConfig[dbName] || {};
+                const localThreshold = diaryConfig.threshold || GLOBAL_SIMILARITY_THRESHOLD;
+                const dbNameVector = await this.getSingleEmbedding(dbName);
+                if (!dbNameVector) return { placeholder, content: '' };
 
-            const dbNameVector = await this.getSingleEmbedding(dbName);
-            if (!dbNameVector) {
-                processedContent = processedContent.replace(placeholder, '');
-                continue;
-            }
-            
-            const baseSimilarity = this.cosineSimilarity(queryVector, dbNameVector);
-            const enhancedVector = this.enhancedVectorCache[dbName];
-            const enhancedSimilarity = enhancedVector ? this.cosineSimilarity(queryVector, enhancedVector) : 0;
-            const finalSimilarity = Math.max(baseSimilarity, enhancedSimilarity);
+                const baseSimilarity = this.cosineSimilarity(queryVector, dbNameVector);
+                const enhancedVector = this.enhancedVectorCache[dbName];
+                const enhancedSimilarity = enhancedVector ? this.cosineSimilarity(queryVector, enhancedVector) : 0;
+                const finalSimilarity = Math.max(baseSimilarity, enhancedSimilarity);
 
-            if (finalSimilarity >= localThreshold) {
-                const diaryContent = await this.getDiaryContent(dbName);
-                // 安全措施：在注入的内容中递归地移除占位符，防止循环
-                const safeContent = diaryContent
-                    .replace(/\[\[.*日记本.*\]\]/g, '[循环占位符已移除]')
-                    .replace(/<<.*日记本>>/g, '[循环占位符已移除]')
-                    .replace(/《《.*日记本.*》》/g, '[循环占位符已移除]');
-                processedContent = processedContent.replace(placeholder, safeContent);
-            } else {
-                processedContent = processedContent.replace(placeholder, '');
-            }
+                if (finalSimilarity >= localThreshold) {
+                    const diaryContent = await this.getDiaryContent(dbName);
+                    const safeContent = diaryContent
+                        .replace(/\[\[.*日记本.*\]\]/g, '[循环占位符已移除]')
+                        .replace(/<<.*日记本>>/g, '[循环占位符已移除]')
+                        .replace(/《《.*日记本.*》》/g, '[循环占位符已移除]');
+                    return { placeholder, content: safeContent };
+                }
+                return { placeholder, content: '' };
+            })());
         }
 
-        // --- 3. 处理 《《...》》 混合模式 ---
+        // --- 3. 准备 《《...》》 混合模式任务 ---
         for (const match of hybridDeclarations) {
             const placeholder = match[0];
             const dbName = match[1];
             if (processedDiaries.has(dbName)) {
                 console.warn(`[RAGDiaryPlugin] Detected circular reference to "${dbName}" in 《《...》》. Skipping.`);
-                processedContent = processedContent.replace(placeholder, `[检测到循环引用，已跳过“${dbName}日记本”的解析]`);
+                processingPromises.push(Promise.resolve({ placeholder, content: `[检测到循环引用，已跳过“${dbName}日记本”的解析]` }));
                 continue;
             }
-            processedDiaries.add(dbName); // 标记为已处理
-            
-            const diaryConfig = this.ragConfig[dbName] || {};
-            const localThreshold = diaryConfig.threshold || GLOBAL_SIMILARITY_THRESHOLD;
+            processedDiaries.add(dbName);
 
-            const dbNameVector = await this.getSingleEmbedding(dbName);
-            if (!dbNameVector) {
-                processedContent = processedContent.replace(placeholder, '');
-                continue;
-            }
+            processingPromises.push((async () => {
+                const diaryConfig = this.ragConfig[dbName] || {};
+                const localThreshold = diaryConfig.threshold || GLOBAL_SIMILARITY_THRESHOLD;
+                const dbNameVector = await this.getSingleEmbedding(dbName);
+                if (!dbNameVector) return { placeholder, content: '' };
 
-            const baseSimilarity = this.cosineSimilarity(queryVector, dbNameVector);
-            const enhancedVector = this.enhancedVectorCache[dbName];
-            const enhancedSimilarity = enhancedVector ? this.cosineSimilarity(queryVector, enhancedVector) : 0;
-            const finalSimilarity = Math.max(baseSimilarity, enhancedSimilarity);
+                const baseSimilarity = this.cosineSimilarity(queryVector, dbNameVector);
+                const enhancedVector = this.enhancedVectorCache[dbName];
+                const enhancedSimilarity = enhancedVector ? this.cosineSimilarity(queryVector, enhancedVector) : 0;
+                const finalSimilarity = Math.max(baseSimilarity, enhancedSimilarity);
 
-            if (finalSimilarity >= localThreshold) {
-                const modifiers = match[2] || '';
-                const retrievedContent = await this._processRAGPlaceholder({
-                    dbName,
-                    modifiers,
-                    queryVector,
-                    userContent,
-                    combinedQueryForDisplay,
-                    dynamicK,
-                    timeRanges, // Pass down the parsed timeRanges
-                    allowTimeAndGroup: true // Enable Time/Group for hybrid mode
-                });
-                processedContent = processedContent.replace(placeholder, retrievedContent);
-            } else {
-                processedContent = processedContent.replace(placeholder, '');
-            }
+                if (finalSimilarity >= localThreshold) {
+                    const modifiers = match[2] || '';
+                    const retrievedContent = await this._processRAGPlaceholder({
+                        dbName, modifiers, queryVector, userContent, combinedQueryForDisplay,
+                        dynamicK, timeRanges, allowTimeAndGroup: true
+                    });
+                    return { placeholder, content: retrievedContent };
+                }
+                return { placeholder, content: '' };
+            })());
+        }
+
+        // --- 执行所有任务并替换内容 ---
+        const results = await Promise.all(processingPromises);
+        for (const result of results) {
+            processedContent = processedContent.replace(result.placeholder, result.content);
         }
 
         return processedContent;
