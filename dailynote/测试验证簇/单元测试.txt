@@ -1,0 +1,72 @@
+【单元测试】
+测试最小可测试单元
+
+单元测试定义：
+独立测试单个函数/方法的正确性
+
+测试原则：
+• FIRST原则
+  - Fast：快速
+  - Independent：独立
+  - Repeatable：可重复
+  - Self-Validating：自我验证
+  - Timely：及时编写
+
+• AAA模式
+  - Arrange：准备
+  - Act：执行
+  - Assert：断言
+
+测试示例：
+```javascript
+describe('UserService', () => {
+  describe('getUserById', () => {
+    it('应该返回用户信息当用户存在时', async () => {
+      // Arrange
+      const userId = 123;
+      const expectedUser = { id: 123, name: 'John' };
+      mockUserRepository.findById.mockResolvedValue(expectedUser);
+      
+      // Act
+      const result = await userService.getUserById(userId);
+      
+      // Assert
+      expect(result).toEqual(expectedUser);
+      expect(mockUserRepository.findById).toHaveBeenCalledWith(userId);
+    });
+    
+    it('应该抛出错误当用户不存在时', async () => {
+      // Arrange
+      mockUserRepository.findById.mockResolvedValue(null);
+      
+      // Act & Assert
+      await expect(userService.getUserById(999))
+        .rejects.toThrow('用户不存在');
+    });
+  });
+});
+```
+
+测试覆盖：
+✓ 正常路径：预期行为
+✓ 边界条件：临界值
+✓ 异常情况：错误处理
+✓ 空值处理：null/undefined
+
+Mock和Stub：
+• Mock：模拟依赖
+• Stub：固定返回值
+• Spy：监视调用
+
+测试命名：
+应该<预期行为>当<条件>时
+
+测试覆盖率：
+→ 行覆盖率：>80%
+→ 分支覆盖率：>75%
+→ 函数覆盖率：>90%
+
+输出：
+- 测试用例：[测试场景]
+- 覆盖率：[覆盖情况]
+- Mock策略：[依赖处理]

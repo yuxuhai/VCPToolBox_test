@@ -1,0 +1,105 @@
+【版本控制】
+管理代码变更历史
+
+Git工作流：
+1. 功能分支流(Feature Branch)
+   ```
+   main (生产)
+     ↑
+   develop (开发)
+     ↑
+   feature/* (功能)
+   ```
+
+2. Git Flow
+   - main：生产
+   - develop：开发
+   - feature/*：功能
+   - release/*：发布
+   - hotfix/*：热修复
+
+3. 主干开发(Trunk-Based)
+   - 主分支开发
+   - 短生命周期分支
+   - 频繁集成
+
+分支命名：
+• feature/功能名
+  feature/user-login
+
+• bugfix/问题描述
+  bugfix/fix-memory-leak
+
+• hotfix/紧急修复
+  hotfix/critical-security-patch
+
+提交规范：
+```
+<type>(<scope>): <subject>
+
+<body>
+
+<footer>
+```
+
+Type类型：
+→ feat：新功能
+→ fix：修复bug
+→ docs：文档
+→ style：格式
+→ refactor：重构
+→ test：测试
+→ chore：构建/工具
+
+示例：
+```
+feat(auth): 添加JWT认证功能
+
+- 实现token生成和验证
+- 添加刷新token机制
+- 更新认证中间件
+
+Closes #123
+```
+
+提交原则：
+✓ 原子提交：一个提交一个改动
+✓ 描述清晰：说明why而非what
+✓ 关联issue：链接相关任务
+✓ 提交前测试：确保能运行
+
+代码审查(Code Review)：
+• Pull Request流程
+  1. 创建PR
+  2. 代码审查
+  3. 讨论修改
+  4. 合并代码
+
+• 审查重点
+  - 功能正确性
+  - 代码质量
+  - 测试覆盖
+  - 性能影响
+  - 安全风险
+
+版本标签：
+• 语义化版本
+  MAJOR.MINOR.PATCH
+  1.2.3
+
+• 标签规则
+  - 主版本：不兼容变更
+  - 次版本：新功能
+  - 修订版本：bug修复
+
+避免：
+✗ 大量文件一次提交
+✗ 提交信息不清晰
+✗ 直接提交到主分支
+✗ 未经审查合并
+
+输出：
+- 分支策略：[分支模型]
+- 提交规范：[提交格式]
+- 审查流程：[CR流程]
+- 发布管理：[版本管理]

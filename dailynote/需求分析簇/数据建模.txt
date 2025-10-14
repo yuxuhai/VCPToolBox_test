@@ -1,0 +1,75 @@
+【数据建模】
+构建系统数据结构
+
+建模步骤：
+1. 识别实体
+   - 核心业务对象
+   - 用户、商品、订单...
+
+2. 定义属性
+   - 实体的特征
+   - 数据类型
+   - 必填/可选
+
+3. 确定关系
+   - 一对一：用户-用户资料
+   - 一对多：用户-订单
+   - 多对多：商品-标签
+
+4. 添加约束
+   - 唯一性
+   - 非空
+   - 外键
+   - 默认值
+
+实体设计：
+```
+用户(User)
+- id: 主键
+- username: 用户名(唯一、非空)
+- email: 邮箱(唯一、非空)
+- password_hash: 密码哈希
+- created_at: 创建时间
+- status: 状态(active/inactive)
+
+订单(Order)
+- id: 主键
+- user_id: 外键→User
+- total_amount: 总金额
+- status: 订单状态
+- created_at: 创建时间
+```
+
+关系图：
+User 1 ─── * Order
+Order * ─── * Product (through OrderItem)
+
+设计原则：
+✓ 规范化：减少冗余
+✓ 适度反规范化：性能优化
+✓ 命名清晰：见名知义
+✓ 考虑扩展性
+
+数据类型选择：
+• 字符串：varchar vs text
+• 数字：int vs bigint vs decimal
+• 时间：datetime vs timestamp
+• 布尔：boolean vs tinyint
+
+索引设计：
+→ 主键索引：id
+→ 唯一索引：email、username
+→ 普通索引：查询字段
+→ 复合索引：多字段查询
+
+注意事项：
+✗ 过度设计
+✗ 字段语义不明
+✗ 缺少时间戳
+✗ 忘记软删除标记
+
+输出：
+- ER图：[实体关系图]
+- 表结构：[详细字段定义]
+- 索引策略：[性能优化]
+- 数据字典：[字段说明]

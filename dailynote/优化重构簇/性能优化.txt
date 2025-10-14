@@ -1,0 +1,98 @@
+【性能优化】
+提升系统响应速度和吞吐量
+
+优化流程：
+测量 → 分析 → 优化 → 验证
+
+1. 测量性能
+   - 建立基线
+   - 识别瓶颈
+   - 量化指标
+
+2. 分析瓶颈
+   - 性能剖析
+   - 慢查询日志
+   - 火焰图
+
+3. 优化实施
+   - 针对性优化
+   - 一次一个
+   - 记录对比
+
+4. 验证效果
+   - 重新测量
+   - 对比数据
+   - 监控观察
+
+常见优化点：
+• 数据库优化
+  - 添加索引
+  - 优化查询
+  - 使用连接池
+  - 批量操作
+  - 读写分离
+
+• 缓存优化
+  - 热点数据缓存
+  - 查询结果缓存
+  - 多级缓存
+  - 缓存预热
+
+• 代码优化
+  - 算法优化
+  - 减少循环层次
+  - 延迟加载
+  - 异步处理
+
+• 网络优化
+  - 减少请求次数
+  - 压缩数据
+  - CDN加速
+  - Keep-Alive
+
+算法优化示例：
+```javascript
+// Before: O(n²)
+function hasDuplicate(arr) {
+  for (let i = 0; i < arr.length; i++) {
+    for (let j = i + 1; j < arr.length; j++) {
+      if (arr[i] === arr[j]) return true;
+    }
+  }
+  return false;
+}
+
+// After: O(n)
+function hasDuplicate(arr) {
+  const set = new Set();
+  for (const item of arr) {
+    if (set.has(item)) return true;
+    set.add(item);
+  }
+  return false;
+}
+```
+
+数据库优化示例：
+```sql
+-- Before: 慢查询
+SELECT * FROM users WHERE name LIKE '%john%';
+
+-- After: 优化
+-- 1. 添加索引
+CREATE INDEX idx_user_name ON users(name);
+-- 2. 改进查询
+SELECT id, name, email FROM users WHERE name LIKE 'john%';
+```
+
+优化原则：
+✓ 先测量后优化
+✓ 优化20%的代码解决80%的问题
+✓ 权衡可读性和性能
+✗ 过早优化
+
+输出：
+- 性能瓶颈：[问题点]
+- 优化方案：[如何优化]
+- 优化效果：[提升多少]
+- 监控指标：[持续观察]

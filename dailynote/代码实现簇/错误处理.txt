@@ -1,0 +1,88 @@
+【错误处理】
+优雅地处理异常和错误
+
+错误分类：
+1. 预期错误(Expected)
+   - 业务错误：用户不存在
+   - 验证错误：参数格式错误
+   - 可恢复
+
+2. 意外错误(Unexpected)
+   - 系统错误：数据库连接失败
+   - 编程错误：空指针
+   - 难以恢复
+
+3. 外部错误
+   - 网络超时
+   - 第三方API失败
+   - 需重试
+
+处理策略：
+• 预期错误
+  - 返回错误码
+  - 友好提示
+  - 记录日志(info)
+
+• 意外错误
+  - 捕获处理
+  - 降级方案
+  - 告警通知
+  - 记录日志(error)
+
+错误处理模式：
+```javascript
+// 1. Try-Catch
+try {
+  const result = await riskyOperation();
+  return result;
+} catch (error) {
+  logger.error('操作失败', error);
+  throw new BusinessError('操作失败，请稍后重试');
+}
+
+// 2. 错误码返回
+if (!user) {
+  return { code: 404, message: '用户不存在' };
+}
+
+// 3. 异常类层次
+class BusinessError extends Error {}
+class ValidationError extends BusinessError {}
+class NotFoundError extends BusinessError {}
+```
+
+错误信息设计：
+✓ 用户友好：不暴露技术细节
+✓ 可操作：提示如何解决
+✓ 可追踪：包含错误码
+✓ 有上下文：关键信息
+
+错误日志：
+→ 错误级别：error/warn/info
+→ 记录内容：时间/用户/操作/堆栈
+→ 敏感信息：脱敏处理
+→ 日志聚合：集中管理
+
+重试策略：
+• 指数退避
+  第1次：1s
+  第2次：2s
+  第3次：4s
+
+• 熔断机制
+  失败率过高→停止调用→定期尝试
+
+• 超时控制
+  设置合理超时时间
+
+避免：
+✗ 吞掉异常
+✗ 空catch块
+✗ 过度捕获
+✗ 错误信息模糊
+
+输出：
+- 错误分类：[错误类型]
+- 处理策略：[如何处理]
+- 日志规范：[记录什么]
+- 重试机制：[如何重试]

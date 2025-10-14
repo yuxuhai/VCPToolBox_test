@@ -1,0 +1,76 @@
+【性能测试】
+验证系统性能指标
+
+性能测试类型：
+1. 负载测试
+   - 正常负载下表现
+   - 找到性能基线
+
+2. 压力测试
+   - 极限负载
+   - 找到瓶颈
+
+3. 耐久性测试
+   - 长时间运行
+   - 内存泄漏检测
+
+4. 尖峰测试
+   - 突发流量
+   - 恢复能力
+
+测试指标：
+• 响应时间
+  - 平均响应时间
+  - P95/P99响应时间
+  - 最大响应时间
+
+• 吞吐量
+  - QPS (Queries Per Second)
+  - TPS (Transactions Per Second)
+
+• 资源使用
+  - CPU使用率
+  - 内存占用
+  - 网络IO
+
+测试工具：
+→ JMeter
+→ Gatling
+→ Locust
+→ K6
+→ Apache Bench
+
+测试场景：
+```javascript
+// K6示例
+import http from 'k6/http';
+import { check } from 'k6';
+
+export let options = {
+  stages: [
+    { duration: '1m', target: 100 },  // 1分钟升到100用户
+    { duration: '3m', target: 100 },  // 保持3分钟
+    { duration: '1m', target: 0 },    // 1分钟降到0
+  ],
+  thresholds: {
+    http_req_duration: ['p(95)<500'], // 95%请求<500ms
+  },
+};
+
+export default function () {
+  let response = http.get('http://api.example.com/users');
+  check(response, {
+    'status is 200': (r) => r.status === 200,
+    'response time < 500ms': (r) => r.timings.duration < 500,
+  });
+}
+```
+
+性能优化循环：
+测试 → 分析瓶颈 → 优化 → 再测试
+
+输出：
+- 测试计划：[测试场景]
+- 性能基线：[目标指标]
+- 瓶颈分析：[性能问题]
+- 优化建议：[改进方向]

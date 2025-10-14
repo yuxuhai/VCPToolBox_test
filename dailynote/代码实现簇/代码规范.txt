@@ -1,0 +1,82 @@
+【代码规范】
+编写可读可维护的代码
+
+规范维度：
+1. 命名规范
+   - 变量/函数：驼峰 getUserInfo
+   - 类/接口：帕斯卡 UserService
+   - 常量：大写下划线 MAX_COUNT
+   - 文件：kebab-case user-service.ts
+
+2. 格式规范
+   - 缩进：2或4空格
+   - 行宽：80-120字符
+   - 空行：逻辑块间空行
+   - 括号：K&R或Allman风格
+
+3. 注释规范
+   - 文件头：说明用途
+   - 函数注释：参数/返回/作用
+   - 复杂逻辑：解释原因
+   - TODO/FIXME：标记待办
+
+4. 代码组织
+   - 单一职责
+   - 函数简短：<50行
+   - 参数控制：<5个
+   - 嵌套深度：<4层
+
+命名原则：
+✓ 见名知义：清晰表达意图
+✓ 避免缩写：除非通用
+✓ 统一风格：团队一致
+✓ 避免魔术数字：用常量
+
+好命名示例：
+```javascript
+// ✓ 好
+const MAX_RETRY_COUNT = 3;
+function getUserById(userId) { }
+const isActive = true;
+
+// ✗ 差
+const m = 3;
+function get(id) { }
+const f = true;
+```
+
+函数设计：
+• 单一职责
+  一个函数只做一件事
+
+• 参数简化
+  - 过多参数用对象
+  - 默认参数
+  - 解构赋值
+
+• 提前返回
+  减少嵌套
+
+代码格式化：
+→ 使用工具：Prettier/ESLint
+→ 团队配置统一
+→ CI自动检查
+
+文档注释：
+```javascript
+/**
+ * 获取用户信息
+ * @param {number} userId - 用户ID
+ * @returns {Promise<User>} 用户对象
+ * @throws {NotFoundError} 用户不存在
+ */
+async function getUserInfo(userId) {
+  // 实现
+}
+```
+
+输出：
+- 命名规范：[命名约定]
+- 格式规范：[代码格式]
+- 注释标准：[注释要求]
+- 组织原则：[代码结构]
