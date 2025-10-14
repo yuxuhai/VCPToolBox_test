@@ -793,8 +793,15 @@ class RAGDiaryPlugin {
             // 分析修饰符字符串
             if (modifiersAndParams) {
                 const parts = modifiersAndParams.split('::').map(p => p.trim()).filter(Boolean);
-
+                const allSubParts = [];
+                
+                // 扁平化处理，如果某个 part 包含 ':', 尝试按 ':' 分割，以分离修饰符和K序列如果它们被粘合在一起
                 for (const part of parts) {
+                    const potentialSubParts = part.split(':').map(p => p.trim()).filter(Boolean);
+                    allSubParts.push(...potentialSubParts);
+                }
+
+                for (const part of allSubParts) {
                     if (part.toLowerCase().startsWith('auto')) {
                         isAutoMode = true;
                         const thresholdMatch = part.match(/:(\d+\.?\d*)/);
