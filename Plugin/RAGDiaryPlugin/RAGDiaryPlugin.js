@@ -1104,14 +1104,16 @@ class RAGDiaryPlugin {
                         // 计算结果向量的平均值
                         const avgResultVector = this._getAverageVector(resultVectors);
                         
-                        // 融合：上下文向量60% + 当前结果向量40%
-                        // 这让推理既保持与原始问题的关联，又能递进到下一层思考
+                        // 使用配置的向量融合权重
+                        const contextWeight = this.metaThinkingChains.vector_fusion_weights?.context_weight || 0.6;
+                        const resultWeight = this.metaThinkingChains.vector_fusion_weights?.result_weight || 0.4;
+                        
                         currentQueryVector = this._getWeightedAverageVector(
                             [queryVector, avgResultVector],
-                            [0.8, 0.2]
+                            [contextWeight, resultWeight]
                         );
                         
-                        console.log(`[RAGDiaryPlugin][MetaThinking] 向量已融合，准备进入下一阶段`);
+                        console.log(`[RAGDiaryPlugin][MetaThinking] 向量已融合(context:${contextWeight} result:${resultWeight})，准备进入下一阶段`);
                     } else {
                         console.warn(`[RAGDiaryPlugin][MetaThinking] 无法获取结果向量，使用原始查询向量`);
                     }
@@ -1180,40 +1182,45 @@ class RAGDiaryPlugin {
     }
 
     /**
-     * 格式化元思考链结果
+     * 格式化元思考链结果 - 优化为AI模型友好格式
      */
     _formatMetaThinkingResults(chainResults, chainName, activatedGroups) {
-        let content = `\n[--- VCP元思考链: "${chainName}" ---]\n`;
+        // 使用简洁的结构化格式,去除装饰性元素
+        let content = `<META_CHAIN:${chainName}>\n`;
         
+        // 语义组信息 - 简化格式
         if (activatedGroups && activatedGroups.size > 0) {
-            content += `[语义组增强: `;
-            const groupNames = [];
+            content += `SEMANTIC_GROUPS:`;
+            const groupInfo = [];
             for (const [groupName, data] of activatedGroups) {
-                groupNames.push(`${groupName}(${(data.strength * 100).toFixed(0)}%)`);
+                groupInfo.push(`${groupName}:${(data.strength * 100).toFixed(0)}%`);
             }
-            content += groupNames.join(', ') + ']\n';
+            content += groupInfo.join(',') + '\n';
         }
 
-        content += `[推理链路径: ${chainResults.map(r => r.clusterName).join(' → ')}]\n\n`;
+        // 推理路径 - 使用简洁箭头
+        content += `PATH:${chainResults.map(r => r.clusterName).join('->')}\n\n`;
 
-        // 输出每个阶段的结果
+        // 输出每个阶段的元逻辑内容 - 去除冗余标记
         for (const stageResult of chainResults) {
-            content += `【阶段${stageResult.stage}: ${stageResult.clusterName}】\n`;
+            content += `<STAGE:${stageResult.stage}:${stageResult.clusterName}>\n`;
             
             if (stageResult.error) {
-                content += `  [错误: ${stageResult.error}]\n`;
+                content += `ERROR:${stageResult.error}\n`;
             } else if (stageResult.results.length === 0) {
-                content += `  [未找到匹配的元逻辑模块]\n`;
+                content += `NO_RESULTS\n`;
             } else {
-                content += `  [召回 ${stageResult.results.length} 个元逻辑模块]\n`;
+                // 直接输出元逻辑内容,无需额外标签
                 for (const result of stageResult.results) {
-                    content += `  * ${result.text.trim()}\n`;
+                    // 去除多余空白,优化信息密度
+                    const trimmedText = result.text.trim().replace(/\n{2,}/g, '\n');
+                    content += `${trimmedText}\n---\n`;
                 }
             }
-            content += '\n';
+            content += `</STAGE>\n\n`;
         }
 
-        content += `[--- 元思考链结束 ---]\n`;
+        content += `</META_CHAIN>\n`;
         return content;
     }
 

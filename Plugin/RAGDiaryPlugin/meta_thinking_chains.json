@@ -114,7 +114,12 @@
     "business_strategy": "3-2-2-1-1",
     "product_design": "2-2-2-1-1"
   },
-  "description": "VCP元思考链配置文件 - 定义递归推理链的簇顺序",
-  "version": "2.0.0",
-  "last_updated": "2025-10-13"
+  "vector_fusion_weights": {
+    "context_weight": 0.6,
+    "result_weight": 0.4,
+    "description": "向量融合权重配置 - context_weight:保持原问题关联性 result_weight:推理递进深度"
+  },
+  "description": "VCP元思考链配置文件 - 定义递归推理链的簇顺序和向量融合策略",
+  "version": "2.1.0",
+  "last_updated": "2025-10-14"
 }
