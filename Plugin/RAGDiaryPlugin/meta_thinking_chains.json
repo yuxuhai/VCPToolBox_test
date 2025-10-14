@@ -86,6 +86,14 @@
       "功能设计簇",
       "体验优化簇",
       "迭代规划簇"
+    ],
+    
+    "roleplay_immersion": [
+      "角色人格簇",
+      "世界观构建簇",
+      "情境感知簇",
+      "对话生成簇",
+      "记忆与连贯簇"
     ]
   },
   "descriptions": {
@@ -112,9 +120,10 @@
     "academic_research": "2-2-2-2-1",
     "teaching": "2-1-2-1-1",
     "business_strategy": "3-2-2-1-1",
-    "product_design": "2-2-2-1-1"
+    "product_design": "2-2-2-1-1",
+    "roleplay_immersion": "3-2-2-2-2"
   },
   "description": "VCP元思考链配置文件 - 定义递归推理链的簇顺序",
-  "version": "2.0.0",
-  "last_updated": "2025-10-13"
+  "version": "2.1.0",
+  "last_updated": "2025-10-14"
 }
