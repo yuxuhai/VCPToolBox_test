@@ -86,6 +86,30 @@
       "功能设计簇",
       "体验优化簇",
       "迭代规划簇"
+    ],
+    
+    "technical_debugging": [
+      "问题诊断簇",
+      "环境分析簇",
+      "根因定位簇",
+      "方案设计簇",
+      "验证总结簇"
+    ],
+    
+    "psychological_counseling": [
+      "共情建立簇",
+      "需求探索簇",
+      "认知重构簇",
+      "资源激活簇",
+      "行动支持簇"
+    ],
+    
+    "business_decision": [
+      "形势研判簇",
+      "利益分析簇",
+      "路径探索簇",
+      "风险权衡簇",
+      "决策建议簇"
     ]
   },
   "descriptions": {
@@ -99,7 +123,8 @@
     "academic_research": "学术研究链 - 学术论文和研究的完整思维链",
     "teaching": "教学设计链 - 从诊断到评估的教学全流程",
     "business_strategy": "商业策略链 - 市场分析到战略执行的商业思维",
-    "product_design": "产品设计链 - 从用户洞察到迭代优化的产品思维"
+    "product_design": "产品设计链 - 从用户洞察到迭代优化的产品思维",
+    "roleplay_experience": "角色扮演体验链 - 酒馆角色卡式沉浸体验，保持角色一致性和情感深度"
   },
   "recommended_k_values": {
     "default": "2-1-1-1-1",
@@ -112,7 +137,11 @@
     "academic_research": "2-2-2-2-1",
     "teaching": "2-1-2-1-1",
     "business_strategy": "3-2-2-1-1",
-    "product_design": "2-2-2-1-1"
+    "product_design": "2-2-2-1-1",
+    "technical_debugging": "2-2-2-1-1",
+    "psychological_counseling": "1-2-2-1-1",
+    "business_decision": "3-2-2-2-1",
+    "roleplay_experience": "3-2-2-2-2"
   },
   "description": "VCP元思考链配置文件 - 定义递归推理链的簇顺序",
   "version": "2.0.0",
