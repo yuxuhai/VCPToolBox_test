@@ -946,8 +946,8 @@ class RAGDiaryPlugin {
                     userContent,
                     combinedQueryForDisplay,
                     dynamicK,
-                    timeRanges: [], // Hybrid mode does not use time ranges
-                    allowTimeAndGroup: false // Disable Time/Group for hybrid mode
+                    timeRanges, // Pass down the parsed timeRanges
+                    allowTimeAndGroup: true // Enable Time/Group for hybrid mode
                 });
                 processedContent = processedContent.replace(placeholder, retrievedContent);
             } else {
