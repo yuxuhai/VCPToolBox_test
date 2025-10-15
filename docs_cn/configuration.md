@@ -1,8 +1,8 @@
 # 配置指南
 
-VCPToolBox的强大之处在于其高度的可配置性。通过编辑项目根目录下的`.env`文件，您可以精细地调整VCPToolBox的每一个功能。本指南将详细解释每个配置项的作用和设置方法。
+VCPToolBox的强大之处在于其高度的可配置性。通过编辑项目根目录下的`config.env`文件，您可以精细地调整VCPToolBox的每一个功能。本指南将详细解释每个配置项的作用和设置方法。
 
-在开始之前，请确保您已经按照[《入门指南》](./getting-started.md)的步骤，将`config.env.example`复制为了`.env`文件。
+在开始之前，请确保您已经按照[《入门指南》](./getting-started.md)的步骤，将`config.env.example`复制为了`config.env`文件。
 
 ---
 
