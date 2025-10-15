@@ -37,22 +37,22 @@ cd VCPToolBox_test
 
 ## 3. 配置您的VCPToolBox
 
-VCPToolBox的配置是通过一个名为`.env`的文件来管理的。项目提供了一个配置模板`config.env.example`，您需要复制并重命名它，然后根据您的需求进行修改。
+VCPToolBox的配置是通过一个名为`config.env`的文件来管理的。项目提供了一个配置模板`config.env.example`，您需要复制它，然后根据您的需求进行修改。
 
 **步骤 3.1: 创建配置文件**
 
 在项目根目录下，执行以下命令复制模板文件：
 
 ```bash
-cp config.env.example .env
+cp config.env.example config.env
 ```
 
 **步骤 3.2: 编辑配置文件**
 
-现在，使用您喜欢的文本编辑器（如`nano`, `vim`, 或 `VS Code`）打开`.env`文件。
+现在，使用您喜欢的文本编辑器（如`nano`, `vim`, 或 `VS Code`）打开`config.env`文件。
 
 ```bash
-nano .env
+nano config.env
 ```
 
 您会看到许多配置项，以下是一些您需要**立即关注**的核心配置：
@@ -78,7 +78,7 @@ nano .env
     ```
     可用的代理可以在`Agent`目录下找到。
 
-> **注意**: `.env`文件中包含许多其他插件和功能的配置项。在初次启动时，您只需关注以上几项即可。其他配置可以在您需要使用特定插件时，再参考[《配置指南》](./configuration.md)和插件的详细说明进行设置。
+> **注意**: `config.env`文件中包含许多其他插件和功能的配置项。在初次启动时，您只需关注以上几项即可。其他配置可以在您需要使用特定插件时，再参考[《配置指南》](./configuration.md)和插件的详细说明进行设置。
 
 ---
 
