@@ -20,27 +20,50 @@
     1.  您需要有一台安装了1Panel的服务器。
     2.  您需要在1Panel中创建API密钥。
 
+#### API密钥获取方法
+
+1.  访问您的1Panel面板（例如：http://your-server-ip:port）
+2.  登录后进入「设置」->「API密钥」
+3.  点击「创建API密钥」
+4.  记录生成的API Key
+
 #### 配置
 
-1.  在`.env`文件中找到并填入1Panel的配置信息：
-    ```env
-    # 1Panel服务器面板地址
-    ONEPANEL_API_URL=http://<your-1panel-ip>:port
-    # 1Panel API Key
-    ONEPANEL_API_KEY=<您的1Panel API Key>
-    # 1Panel API Secret
-    ONEPANEL_API_SECRET=<您的1Panel API Secret>
-    ```
-    *   请将`<your-1panel-ip>:port`替换为您的1Panel面板的实际访问地址。
-    *   API Key和Secret可以在1Panel面板的「设置」->「API密钥」中创建。
-2.  在`TVStxt/supertool.txt`中，确保`{{VCP1PanelInfoProvider}}`行没有被注释。
+**配置文件位置：** `Plugin/1PanelInfoProvider/config.env`
+
+```env
+# 1Panel 应用的 URL
+PanelBaseUrl=http://your-1panel-domain:port
+
+# 1Panel OpenAPI Key
+PanelApiKey=xxxxxxxxxxxxxxxxxxxxxxxx
+
+# 是否为此插件启用调试模式
+DebugMode=False
+
+# 是否启用此插件
+Enabled=True
+```
+
+#### 启用插件
+
+**方式一：通过工具列表文件**
+
+在`TVStxt/supertool.txt`中，确保`{{VCP1PanelInfoProvider}}`行没有被`#`注释。
+
+**方式二：直接在系统提示词中添加**
+
+```
+1Panel服务器管理：
+{{VCP1PanelInfoProvider}}
+```
 
 #### 使用方法
 
 **示例指令**：
-> “帮我看看1Panel服务器上所有应用的状态。”
+> "帮我看看1Panel服务器上所有应用的状态。"
 
-> “查询一下服务器的实时系统负载。”
+> "查询一下服务器的实时系统负载。"
 
 ---
 
@@ -51,31 +74,53 @@
 
 #### 配置
 
-1.  在`frps.ini`（您的FRPS配置文件）中，确保dashboard相关配置已启用：
-    ```ini
-    [common]
-    bind_port = 7000
-    dashboard_port = 7500
-    dashboard_user = admin
-    dashboard_pwd = admin
-    ```
-2.  在VCPToolBox的`.env`文件中，填入FRPS dashboard的访问信息：
-    ```env
-    # FRPS Dashboard的地址
-    FRPS_API_URL=http://<your-frps-ip>:7500
-    # FRPS Dashboard的用户名
-    FRPS_API_USER=admin
-    # FRPS Dashboard的密码
-    FRPS_API_PASSWORD=admin
-    ```
-3.  在`TVStxt/supertool.txt`中，确保`{{VCPFRPSInfoProvider}}`行没有被注释。
+**1. FRPS服务器配置**
+
+在`frps.ini`（您的FRPS配置文件）中，确保dashboard相关配置已启用：
+
+```ini
+[common]
+bind_port = 7000
+dashboard_port = 7500
+dashboard_user = admin
+dashboard_pwd = admin
+```
+
+**2. 插件配置文件位置：** `Plugin/FRPSInfoProvider/config.env`
+
+```env
+# FRPS服务器基础URL
+FRPSBaseUrl=http://localhost:7500
+
+# FRPS API管理员用户名
+FRPSAdminUser=admin
+
+# FRPS API管理员密码
+FRPSAdminPassword=your_frps_admin_password
+
+# 调试模式
+DebugMode=false
+```
+
+#### 启用插件
+
+**方式一：通过工具列表文件**
+
+在`TVStxt/supertool.txt`中，确保`{{VCPFRPSInfoProvider}}`行没有被`#`注释。
+
+**方式二：直接在系统提示词中添加**
+
+```
+FRP服务器监控：
+{{VCPFRPSInfoProvider}}
+```
 
 #### 使用方法
 
 **示例指令**：
-> “检查一下我的FRP服务器上有哪些客户端在线。”
+> "检查一下我的FRP服务器上有哪些客户端在线。"
 
-> “查询名为‘home-nas’的FRP客户端的流量信息。”
+> "查询名为'home-nas'的FRP客户端的流量信息。"
 
 ---
 
@@ -86,31 +131,47 @@
 
 #### 配置
 
-1.  **VCPToolBox端 (`.env`文件)**：
-    ```env
-    # MCPO 监控密钥，需要与客户端保持一致
-    MCPO_SECRET_KEY=<您的共享密钥>
-    ```
-2.  **客户端 (例如，一个ComfyUI实例)**：
-    *   您需要在客户端上运行`Plugin/MCPO/mcpo_client.py`脚本。
-    *   为该脚本创建一个`config.ini`文件，填入VCPToolBox服务器地址和密钥。
-    ```ini
-    [server]
-    url = http://<your-vcp-ip>:6005/mcpo
-    secret_key = <您的共享密钥>
+**1. VCPToolBox端配置文件：** `Plugin/MCPO/config.env` 和 `Plugin/MCPOMonitor/config.env`
 
-    [process]
-    name = ComfyUI-Main
-    command = python main.py --listen --enable-cors
-    ```
-3.  在`TVStxt/supertool.txt`中，确保`{{VCPMCPO}}`和`{{VCPMCPOMonitor}}`行没有被注释。
+```env
+# MCPO 监控密钥，需要与客户端保持一致
+MCPO_SECRET_KEY=your_shared_secret_key
+```
+
+**2. 客户端配置**
+
+在客户端上运行`Plugin/MCPO/mcpo_client.py`脚本，并创建`config.ini`文件：
+
+```ini
+[server]
+url = http://your-vcp-ip:6005/mcpo
+secret_key = your_shared_secret_key
+
+[process]
+name = ComfyUI-Main
+command = python main.py --listen --enable-cors
+```
+
+#### 启用插件
+
+**方式一：通过工具列表文件**
+
+在`TVStxt/supertool.txt`中，确保`{{VCPMCPO}}`和`{{VCPMCPOMonitor}}`行没有被`#`注释。
+
+**方式二：直接在系统提示词中添加**
+
+```
+多客户端进程监控：
+{{VCPMCPO}}
+{{VCPMCPOMonitor}}
+```
 
 #### 使用方法
 
 **示例指令**：
-> “检查一下所有MCPO客户端的状态。”
+> "检查一下所有MCPO客户端的状态。"
 
-> “ComfyUI-Main这个客户端在线吗？”
+> "ComfyUI-Main这个客户端在线吗？"
 
 ---
 
@@ -122,49 +183,152 @@
     2.  您需要在服务器上注册一个用于机器人的账号，并获取其Access Token。
     3.  您需要创建一个房间，并将机器人账号邀请进去。
 
+#### Access Token获取方法
+
+1.  使用Element或其他Matrix客户端登录机器人账号
+2.  进入「设置」->「帮助&关于」->「高级」
+3.  找到「Access Token」并复制
+4.  **注意**：Access Token应严格保密
+
 #### 配置
 
-1.  在`.env`文件中填入Synapse服务器和机器人的信息：
-    ```env
-    # Synapse服务器地址
-    SYNAPSE_HOMESERVER_URL=https://your-synapse-server.com
-    # 机器人账号的Access Token
-    SYNAPSE_ACCESS_TOKEN=<您的机器人Access Token>
-    # 要推送消息的目标房间ID
-    SYNAPSE_ROOM_ID=!yourRoomId:your-synapse-server.com
-    ```
-2.  在`TVStxt/supertool.txt`中，确保`{{VCPSynapsePusher}}`行没有被注释。
+**配置文件位置：** `Plugin/SynapsePusher/config.env`
+
+```env
+# 启用调试模式
+DebugMode=False
+
+# VCP_Key用于WebSocket认证
+VCP_Key=your_shared_vcplog_websocket_key
+
+# Synapse Homeserver URL
+SynapseHomeserver=https://matrix-client.matrix.org
+
+# Synapse房间ID
+SynapseRoomID=!yourRoomId:matrix.org
+
+# --- 严格配置（正常操作）---
+# JSON格式的Maid名称到Access Token的映射
+MaidAccessTokensJSON={"XXX":"syt_XXX_TOKEN","YYY":"syt_YYY_TOKEN"}
+
+# JSON格式的Maid工具白名单
+MaidToolWhitelistJSON={"XXX":["ToolA","ToolB"],"YYY":["ToolB","ToolC","ToolD"]}
+
+# --- 测试绕过配置（仅用于测试）---
+BypassWhitelistForTesting=False
+SynapseAccessTokenForTestingOnly=syt_YOUR_GENERAL_TESTING_TOKEN
+```
+
+#### 启用插件
+
+**方式一：通过工具列表文件**
+
+在`TVStxt/supertool.txt`中，确保`{{VCPSynapsePusher}}`行没有被`#`注释。
+
+**方式二：直接在系统提示词中添加**
+
+```
+Matrix消息推送：
+{{VCPSynapsePusher}}
+```
 
 #### 使用方法
 
 **示例指令**：
-> “向Matrix房间发送一条消息，内容是‘服务器重启完成’。”
+> "向Matrix房间发送一条消息，内容是'服务器重启完成'。"
 
-> “把这段文字推送到Synapse。”
+> "把这段文字推送到Synapse。"
 
 ---
 
 ## 5. VCP 日志 (VCPLog)
 
 *   **作用**：用于获取和分析VCPToolBox自身的运行日志。当出现问题需要排查，或者您想了解AI最近都调用了哪些工具时，这个插件非常有用。
-*   **前置条件**：无。开箱即用。
+*   **前置条件**：无。
 
 #### 配置
 
-*   在`.env`文件中，您可以配置日志相关的参数：
-    ```env
-    # 日志文件的路径
-    LOG_PATH=./logs/vcp.log
-    # 日志文件的最大大小（MB）
-    LOG_MAX_SIZE=10
-    # 保留的旧日志文件数量
-    LOG_MAX_FILES=5
-    ```
-*   在`TVStxt/supertool.txt`中，确保`{{VCPLog}}`行没有被注释。
+**配置文件位置：** `Plugin/VCPLog/config.env`
+
+```env
+# VCP_Key用于WebSocket认证
+VCP_Key=Your_Secret_VCP_Key_Here
+
+# --- Gotify推送通知（可选）---
+# 启用/禁用Gotify推送
+Enable_Gotify_Push=false
+
+# Gotify服务器URL
+Gotify_Url=https://your.gotify.url
+
+# Gotify应用令牌
+Gotify_App_Token=XXXXXXXXXXXXXXXXXXX
+
+# Gotify消息优先级（0-10）
+Gotify_Priority=0
+```
+
+**注意**：日志相关的全局参数通常在项目根目录的`config.env`中配置：
+
+```env
+# 日志文件的路径
+LOG_PATH=./logs/vcp.log
+
+# 日志文件的最大大小（MB）
+LOG_MAX_SIZE=10
+
+# 保留的旧日志文件数量
+LOG_MAX_FILES=5
+```
+
+#### 启用插件
+
+**方式一：通过工具列表文件**
+
+在`TVStxt/supertool.txt`中，确保`{{VCPLog}}`行没有被`#`注释。
+
+**方式二：直接在系统提示词中添加**
+
+```
+日志分析工具：
+{{VCPLog}}
+```
 
 #### 使用方法
 
 **示例指令**：
-> “帮我看看最近10条VCP的错误日志。”
+> "帮我看看最近10条VCP的错误日志。"
 
-> “分析一下日志，找出最近一小时内调用最频繁的插件是哪个。”
+> "分析一下日志，找出最近一小时内调用最频繁的插件是哪个。"
+
+---
+
+## 通用提示
+
+### 系统集成最佳实践
+
+1.  **安全性**：
+    - 所有API密钥、Access Token应严格保密
+    - 不要在公共仓库中提交包含敏感信息的配置文件
+    - 定期更换密钥和令牌
+
+2.  **监控策略**：
+    - 合理配置监控频率，避免过度占用资源
+    - 结合VCPLog插件及时发现系统异常
+    - 设置必要的告警推送
+
+3.  **工具组合**：
+    您可以在系统提示词中组合使用多个监控工具：
+
+    ```
+    系统监控工具：
+    - 1Panel管理：{{VCP1PanelInfoProvider}}
+    - FRP监控：{{VCPFRPSInfoProvider}}
+    - 进程监控：{{VCPMCPOMonitor}}
+    - 日志分析：{{VCPLog}}
+    
+    消息推送：
+    {{VCPSynapsePusher}}
+    
+    请根据需求选择合适的工具进行系统监控和信息推送。
+    ```
