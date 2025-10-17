@@ -506,21 +506,36 @@ class VectorDBManager {
         console.log(`[VectorDB][Search] Received async search request for "${diaryName}".`);
         await this.trackUsage(diaryName);
 
-        const safeFileNameBase = Buffer.from(diaryName, 'utf-8').toString('base64url');
-        const indexPath = path.join(VECTOR_STORE_PATH, `${safeFileNameBase}.bin`);
-        try {
-            await fs.access(indexPath);
-        } catch (error) {
-            console.error(`[VectorDB][Search] Index file for "${diaryName}" does not exist. Cannot start search worker.`);
+        // --- Bug Fix: K-value Sanity Check ---
+        // 1. Ensure the index is loaded to check its size.
+        const loaded = await this.loadIndexForSearch(diaryName);
+        if (!loaded) {
+            console.error(`[VectorDB][Search] Index for "${diaryName}" could not be loaded. Aborting search.`);
             return [];
         }
+
+        const index = this.indices.get(diaryName);
+        const maxElements = index.getMaxElements();
+
+        // 2. If the index is empty, no search is possible.
+        if (maxElements === 0) {
+            console.log(`[VectorDB][Search] Index for "${diaryName}" is empty. Returning no results.`);
+            return [];
+        }
+
+        // 3. Clamp the k-value to be no larger than the number of elements in the index.
+        const finalK = Math.min(k, maxElements);
+        if (finalK !== k) {
+            console.warn(`[VectorDB][Search] Requested k=${k} is greater than max elements (${maxElements}) for "${diaryName}". Clamping to k=${finalK}.`);
+        }
+        // --- End of Bug Fix ---
 
         try {
             console.log(`[VectorDB][Search] Queuing search task for "${diaryName}" in worker pool.`);
             const workerData = {
                 diaryName,
                 queryVector,
-                k,
+                k: finalK, // Use the sanitized k-value
                 efSearch: this.config.efSearch,
                 vectorStorePath: VECTOR_STORE_PATH,
             };
@@ -530,7 +545,7 @@ class VectorDBManager {
             console.log(`[VectorDB][Search] Received message from worker for "${diaryName}". Status: ${message.status}`);
             if (message.status === 'success') {
                 const searchResults = message.results;
-                this.searchCache.set(diaryName, queryVector, k, searchResults);
+                this.searchCache.set(diaryName, queryVector, k, searchResults); // Cache with original k
                 this.recordMetric('search_success', performance.now() - startTime);
                 console.log(`[VectorDB][Search] Worker found ${searchResults.length} matching chunks for "${diaryName}".`);
                 return searchResults;
