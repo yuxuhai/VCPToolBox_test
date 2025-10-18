@@ -23,7 +23,7 @@ from numpy import inf as numpy_inf, nan as numpy_nan # For numerical integration
 allowed_operators = {
     ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
     ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
-    ast.Pow: operator.pow, ast.USub: operator.neg,
+    ast.Pow: operator.pow, ast.USub: operator.neg, ast.UAdd: operator.pos,
 }
 
 # 支持的数学和统计函数 (用于直接数值计算)
@@ -230,18 +230,21 @@ def evaluate(expression: str) -> str:
         elif isinstance(node, ast.BinOp):
             left = eval_expr(node.left)
             right = eval_expr(node.right)
-            if isinstance(left, str) or isinstance(right, str): 
-                raise ValueError(f"Cannot perform arithmetic operation '{type(node.op).__name__}' with non-numeric string operands: '{left}', '{right}'")
-            if not all(isinstance(x, (int, float, complex)) for x in [left, right]):
-                     raise ValueError(f"Operands for '{type(node.op).__name__}' must be numeric, got {type(left).__name__} and {type(right).__name__}")
-            if type(node.op) in allowed_operators:
-                return allowed_operators[type(node.op)](left, right)
-            raise ValueError(f"Unsupported binary operation: {type(node.op).__name__}")
-        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            operand_val = eval_expr(node.operand)
-            if isinstance(operand_val, str):
-                 raise ValueError(f"Cannot apply unary minus to non-numeric string operand: '{operand_val}'")
-            return -operand_val
+            op_type = type(node.op)
+            if op_type in allowed_operators:
+                try:
+                    return allowed_operators[op_type](left, right)
+                except TypeError:
+                    raise ValueError(f"Unsupported operand types for {op_type.__name__}: '{type(left).__name__}' and '{type(right).__name__}'")
+            raise ValueError(f"Unsupported binary operation: {op_type.__name__}")
+        elif isinstance(node, ast.UnaryOp):
+            operand = eval_expr(node.operand)
+            if isinstance(operand, str):
+                raise ValueError(f"Cannot apply unary operation '{type(node.op).__name__}' to non-numeric string operand: '{operand}'")
+            op_type = type(node.op)
+            if op_type in allowed_operators:
+                return allowed_operators[op_type](operand)
+            raise ValueError(f"Unsupported unary operation: {op_type.__name__}")
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             func_name = node.func.id
             
@@ -413,6 +416,9 @@ def evaluate(expression: str) -> str:
         expression_str_input = str(expression).strip()
         if not expression_str_input:
             raise ValueError("Expression cannot be empty.")
+
+        # Preprocess the expression to handle custom syntax like '^' for power
+        expression_str_input = preprocess_expression_string(expression_str_input)
         
         brackets = {'(': ')', '[': ']', '{': '}'}
         stack = []
@@ -523,7 +529,7 @@ def main():
             original_expressions = list(expressions)
 
         # Clean expressions for evaluation (e.g., remove "1. " prefixes)
-        cleaned_expressions = [re.sub(r'^\s*\d+[\.\)]?\s*', '', expr).strip() for expr in expressions]
+        cleaned_expressions = [re.sub(r'^\s*\d+[\.\)]\s*', '', expr).strip() for expr in expressions]
         
         # Evaluate each non-empty expression
         results = [evaluate(expr) for expr in cleaned_expressions if expr]
