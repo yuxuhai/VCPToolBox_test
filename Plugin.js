@@ -237,7 +237,7 @@ class PluginManager {
                 const command = 'python';
                 const args = ['-c', 'import sympy, scipy.stats, scipy.integrate, numpy'];
                 const prewarmProcess = spawn(command, args, {
-                    shell: true, // Helps find python in PATH on Windows
+                    // 移除 shell: true
                     windowsHide: true
                 });
 
