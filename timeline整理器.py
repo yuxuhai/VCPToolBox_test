@@ -59,7 +59,7 @@ def main():
     主函数，用于查找和处理所有时间线文件。
     """
     input_dir = 'timeline'
-    output_dir = 'TVStxt'
+    output_dir = 'timeline已整理'
 
     # 如果目录不存在，则创建它们
     if not os.path.exists(input_dir):
