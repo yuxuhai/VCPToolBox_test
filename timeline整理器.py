@@ -1,6 +1,7 @@
 import os
 import json
 from collections import OrderedDict
+from datetime import datetime
 
 def process_timeline_file(input_path, output_path):
     """
@@ -18,7 +19,7 @@ def process_timeline_file(input_path, output_path):
 
         # 按升序（最早优先）对日期进行排序
         # Python 3.7+ dicts preserve insertion order, but sorting keys is more robust.
-        sorted_dates = sorted(entries.keys())
+        sorted_dates = sorted(entries.keys(), key=lambda date_str: datetime.strptime(date_str, '%Y-%m-%d'))
 
         # 将处理后的内容写入输出文件
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -33,7 +34,7 @@ def process_timeline_file(input_path, output_path):
             for i, date in enumerate(sorted_dates):
                 f.write(f"## {date}\n")
                 for entry in entries[date]:
-                    summary = entry.get('summary', '无有效总结').strip()
+                    summary = entry.get('summary', '无有效总结').strip().rstrip('。<')
                     f.write(f"- {summary}\n")
                 
                 # 在日期块之间添加一个空行以提高可读性，但最后一个块后面不加
