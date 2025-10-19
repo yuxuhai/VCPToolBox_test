@@ -102,11 +102,17 @@ function setupWatcher() {
     });
 
     const initialScanFiles = new Set();
+    let isReady = false;
 
     watcher
         .on('add', filePath => {
             const fileExtension = path.extname(filePath).toLowerCase();
-            if (['.txt', '.md'].includes(fileExtension)) {
+            if (!['.txt', '.md'].includes(fileExtension)) return;
+
+            if (isReady) {
+                console.log(`[TimelineGenerator] New file detected: ${path.basename(filePath)}`);
+                addToQueue(filePath);
+            } else {
                 initialScanFiles.add(filePath);
             }
         })
@@ -118,6 +124,7 @@ function setupWatcher() {
             }
         })
         .on('ready', async () => {
+            isReady = true;
             console.log(`[TimelineGenerator] Initial scan complete. Found ${initialScanFiles.size} files.`);
             const db = await readJsonFile(dbPath, {});
             let filesToProcessCount = 0;
