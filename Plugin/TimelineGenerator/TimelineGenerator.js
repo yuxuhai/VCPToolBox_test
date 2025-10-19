@@ -15,8 +15,13 @@ const summaryQueue = [];
 let isProcessingQueue = false;
 let isInitialScan = true;
 const initialScanQueue = [];
+// --- 辅助函数 ---
+function normalizePath(filePath) {
+   return path.normalize(filePath).replace(/\\/g, '/');
+}
 
 // --- 插件生命周期函数 ---
+
 
 async function initialize(config, dependencies) {
     pluginConfig = config;
@@ -81,7 +86,7 @@ async function reprocessFailedSummaries() {
                             // 兼容新旧两种路径格式
                             const absoluteFilePath = path.isAbsolute(entry.filePath)
                                 ? entry.filePath
-                                : path.join(projectBasePath, entry.filePath);
+                                : path.join(projectBasePath, normalizePath(entry.filePath));  // ✅ 规范化
                             
                             try {
                                 await fs.access(absoluteFilePath);
@@ -147,16 +152,60 @@ function setupWatcher() {
             }
         })
         .on('ready', async () => {
-            console.log(`[TimelineGenerator] Initial scan complete. Found ${initialScanQueue.length} existing files to process.`);
-            isInitialScan = false;
-            
-            for (const filePath of initialScanQueue) {
-                addToQueue(filePath);
-            }
-            initialScanQueue.length = 0;
-            
-            console.log('[TimelineGenerator] Finished processing initial files. Now monitoring for new changes...');
-        })
+           console.log(`[TimelineGenerator] Initial scan complete. Found ${initialScanQueue.length} files.`);
+           isInitialScan = false;
+           
+           // ✅ 添加预过滤逻辑
+           const filesToProcess = [];
+           for (const filePath of initialScanQueue) {
+               const relativeFilePath = normalizePath(path.relative(projectBasePath, filePath));
+               
+               // 检查是否已处理
+               let shouldProcess = true;
+               try {
+                   const content = await fs.readFile(filePath, 'utf-8');
+                   const firstLine = content.split('\n')[0].trim();
+                   const match = firstLine.match(/^(?:```math(\d{4}[\.\-]\d{1,2}[\.\-]\d{1,2})```\s*-\s*(.+)|(\d{4}[\.\-]\d{1,2}[\.\-]\d{1,2})-(.+))$/);
+                   
+                   if (match) {
+                       const characterName = ((match[2] || match[4]) || '').trim();
+                       const archivePath = path.join(timelineDir, `${characterName}timeline.json`);
+                       
+                       try {
+                           const archiveData = JSON.parse(await fs.readFile(archivePath, 'utf-8'));
+                           const existing = archiveData.processedEntries?.find(e =>
+                               normalizePath(e.filePath) === relativeFilePath
+                           );
+                           
+                           if (existing && existing.status === 'summarized') {
+                               shouldProcess = false;
+                               if (pluginConfig.DebugMode) {
+                                   console.log(`[TimelineGenerator] 🔄 Skipping already processed: ${path.basename(filePath)}`);
+                               }
+                           }
+                       } catch (e) {
+                           // JSON 不存在，需要处理
+                       }
+                   }
+               } catch (e) {
+                   // 读取失败，跳过
+                   shouldProcess = false;
+               }
+               
+               if (shouldProcess) {
+                   filesToProcess.push(filePath);
+               }
+           }
+           
+           console.log(`[TimelineGenerator] After filtering: ${filesToProcess.length} files need processing.`);
+           
+           for (const filePath of filesToProcess) {
+               addToQueue(filePath);
+           }
+           
+           initialScanQueue.length = 0;
+           console.log('[TimelineGenerator] Now monitoring for new changes...');
+       })
         .on('error', error => console.error(`[TimelineGenerator] Watcher error: ${error}`));
 }
 
@@ -221,8 +270,8 @@ async function processFile(filePath) {
             if (error.code !== 'ENOENT') throw error;
         }
 
-        const relativeFilePath = path.relative(projectBasePath, filePath);
-        const existingEntry = archiveData.processedEntries.find(e => e.filePath === relativeFilePath);
+        const relativeFilePath = normalizePath(path.relative(projectBasePath, filePath));
+        const existingEntry = archiveData.processedEntries.find(e => normalizePath(e.filePath) === relativeFilePath);
 
         if (existingEntry && existingEntry.status === 'summarized') {
             if (pluginConfig.DebugMode) console.log(`[TimelineGenerator] File already successfully summarized, skipping: ${path.basename(filePath)}`);
@@ -416,7 +465,7 @@ async function updateArchiveJson(archivePath, archiveData, relativeFilePath, sta
         archiveData.processedEntries = [];
     }
 
-    const entryIndex = archiveData.processedEntries.findIndex(e => e.filePath === relativeFilePath);
+    const entryIndex = archiveData.processedEntries.findIndex(e => normalizePath(e.filePath) === relativeFilePath);
 
     if (entryIndex > -1) {
         const entry = archiveData.processedEntries[entryIndex];
