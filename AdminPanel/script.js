@@ -76,7 +76,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const serverLogPathDisplay = document.getElementById('server-log-path-display');
     const serverLogStatusSpan = document.getElementById('server-log-status');
     const serverLogContentPre = document.getElementById('server-log-content');
+    const serverLogFilterInput = document.getElementById('server-log-filter');
     let serverLogIntervalId = null; // For server log auto-refresh
+    let originalLogContent = ''; // To store the full log content for filtering
     
     // Sidebar Search
     const sidebarSearchInput = document.getElementById('sidebar-search');
@@ -2248,6 +2250,44 @@ Description Length: ${newDescription.length}`);
             serverLogIntervalId = setInterval(loadServerLog, 2000); // Poll every 2 seconds
             console.log('Started server log auto-refresh interval.');
         }
+        if (serverLogFilterInput) serverLogFilterInput.value = ''; // Clear filter on init
+
+        await loadServerLog(); // Perform the initial load
+
+        // Start polling after the initial load
+        if (!serverLogIntervalId) {
+            serverLogIntervalId = setInterval(loadServerLog, 2000); // Poll every 2 seconds
+            console.log('Started server log auto-refresh interval.');
+        }
+    }
+
+    function filterAndHighlightLog() {
+        if (!serverLogContentPre || !serverLogFilterInput) return;
+
+        const filterValue = serverLogFilterInput.value.trim().toLowerCase();
+        
+        if (!filterValue) {
+            serverLogContentPre.textContent = originalLogContent;
+            return;
+        }
+
+        const lines = originalLogContent.split('\n');
+        const filteredLines = [];
+        const escapedFilterValue = filterValue.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+        const highlightRegex = new RegExp(escapedFilterValue, 'gi');
+
+        for (const line of lines) {
+            if (line.toLowerCase().includes(filterValue)) {
+                const highlightedLine = line.replace(highlightRegex, (match) => `<span class="highlight">${match}</span>`);
+                filteredLines.push(highlightedLine);
+            }
+        }
+
+        if (filteredLines.length > 0) {
+            serverLogContentPre.innerHTML = filteredLines.join('\n');
+        } else {
+            serverLogContentPre.textContent = `没有找到包含 "${serverLogFilterInput.value}" 的日志条目。`;
+        }
     }
 
     async function loadServerLog() {
@@ -2259,14 +2299,19 @@ Description Length: ${newDescription.length}`);
         serverLogStatusSpan.className = 'status-message info';
         try {
             const data = await apiFetch(`${API_BASE_URL}/server-log`);
-            serverLogContentPre.textContent = data.content || '日志内容为空或加载失败。';
+            originalLogContent = data.content || '日志内容为空或加载失败。';
             serverLogPathDisplay.textContent = `当前日志文件: ${data.path || '未知'}`;
             serverLogStatusSpan.textContent = '日志已加载。';
             serverLogStatusSpan.className = 'status-message success';
-            // Scroll to bottom
-            serverLogContentPre.scrollTop = serverLogContentPre.scrollHeight;
+            
+            filterAndHighlightLog();
+
+            if (!serverLogFilterInput.value.trim()) {
+                serverLogContentPre.scrollTop = serverLogContentPre.scrollHeight;
+            }
         } catch (error) {
-            serverLogContentPre.textContent = `加载服务器日志失败: ${error.message}\n\n(可能是因为服务器刚刚重启，日志文件路径已更改，或日志文件为空。)`;
+            originalLogContent = `加载服务器日志失败: ${error.message}\n\n(可能是因为服务器刚刚重启，日志文件路径已更改，或日志文件为空。)`;
+            serverLogContentPre.textContent = originalLogContent;
             serverLogPathDisplay.textContent = `当前日志文件: 未知`;
             serverLogStatusSpan.textContent = `加载失败: ${error.message}`;
             serverLogStatusSpan.className = 'status-message error';
@@ -2277,6 +2322,9 @@ Description Length: ${newDescription.length}`);
     // Event Listeners for Server Log Viewer
     if (copyServerLogButton) { // Changed from refreshServerLogButton
         copyServerLogButton.addEventListener('click', copyServerLogToClipboard);
+    }
+    if (serverLogFilterInput) {
+        serverLogFilterInput.addEventListener('input', filterAndHighlightLog);
     }
 
     async function copyServerLogToClipboard() {
