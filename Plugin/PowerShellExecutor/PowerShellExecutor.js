@@ -2,6 +2,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const crypto = require('crypto');
 const http = require('http'); // 用于向主服务器发送回调
+const fs = require('fs').promises; // 添加 fs 模块
 
 // 用于向主服务器发送回调的函数
 function sendCallback(requestId, status, result) {
@@ -41,6 +42,20 @@ function sendCallback(requestId, status, result) {
 
     req.write(payload);
     req.end();
+}
+
+// 解密验证码
+function decryptCode(encryptedCode) {
+    const secretKey = '314159'; // 必须与 auth.js 中的密钥相同
+    let realCode = '';
+    for (let i = 0; i < encryptedCode.length; i++) {
+        const encryptedDigit = parseInt(encryptedCode[i], 10);
+        const keyDigit = parseInt(secretKey[i], 10);
+        // 解密逻辑：(加密数字 - 密钥数字 + 10) % 10
+        const realDigit = (encryptedDigit - keyDigit + 10) % 10;
+        realCode += realDigit;
+    }
+    return realCode;
 }
 
 async function executePowerShellCommand(command, executionType = 'blocking', timeout = 60000) {
@@ -126,6 +141,7 @@ async function main() {
             const args = JSON.parse(input);
             const command = args.command;
             const executionType = args.executionType;
+            const requireAdmin = args.requireAdmin;
 
             if (!executionType || (executionType !== 'blocking' && executionType !== 'background')) {
                 throw new Error('缺少或无效的参数: executionType。必须是 "blocking" 或 "background"。');
@@ -133,6 +149,27 @@ async function main() {
 
             if (!command) {
                 throw new Error('缺少必需参数: command');
+            }
+
+            // 管理员模式验证
+            if (requireAdmin) {
+                if (executionType !== 'background') {
+                    throw new Error('管理员模式仅支持 "background" 执行类型。');
+                }
+
+                const authCodePath = path.join(__dirname, '..', 'UserAuth', 'auth_code.txt');
+                let encryptedCode;
+                try {
+                    encryptedCode = (await fs.readFile(authCodePath, 'utf-8')).trim();
+                } catch (e) {
+                    throw new Error('读取验证码文件失败。请确保UserAuth插件已生成验证码。');
+                }
+
+                const realCode = decryptCode(encryptedCode);
+
+                if (String(requireAdmin) !== realCode) {
+                    throw new Error('管理员验证码错误。');
+                }
             }
 
             if (executionType === 'background') {
