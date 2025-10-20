@@ -70,7 +70,7 @@ async function executePowerShellCommand(command, executionType = 'blocking', tim
         if (executionType === 'background') {
             // 对于异步执行，打开一个可见的PowerShell窗口
             // 使用'start'命令打开一个可见的PowerShell窗口的正确方法
-            const args = ['/c', 'start', 'powershell.exe', '-NoExit', '-Command', fullCommand];
+            const args = ['/c', 'start', 'powershell.exe', '-Command', fullCommand];
             
             // 我们调用cmd.exe来使用它的'start'命令
             child = spawn('cmd.exe', args, {
@@ -173,21 +173,61 @@ async function main() {
             }
 
             if (executionType === 'background') {
-                const requestId = crypto.randomUUID(); // 为后台任务生成唯一ID
-                // 启动后台命令而不等待其完成
-                executePowerShellCommand(command, executionType)
-                    .then(output => {
-                        sendCallback(requestId, 'success', output);
-                    })
-                    .catch(error => {
-                        sendCallback(requestId, 'error', error.message);
-                    });
+                const requestId = crypto.randomUUID();
+                const tempFilePath = path.join(__dirname, `${requestId}.log`);
+                const finalCommand = `${command} *>&1 | Tee-Object -FilePath "${tempFilePath}"`;
 
-                // 立即返回一个占位符给AI
-                const resultStringForAI = `PowerShell后台任务已提交。`;
-                console.log(JSON.stringify({ status: 'success', result: resultStringForAI }));
+                // 启动一个可见的PowerShell窗口，但我们的脚本不等待它
+                executePowerShellCommand(finalCommand, 'background');
+
+                // 关键：现在我们等待轮询完成，而不是立即响应
+                const output = await new Promise((resolve, reject) => {
+                    let lastSize = -1;
+                    let idleCycles = 0;
+                    const maxIdleCycles = 3; // 6秒
+                    const pollingInterval = 2000; // 2秒
+
+                    const intervalId = setInterval(async () => {
+                        try {
+                            const stats = await fs.stat(tempFilePath).catch(() => null);
+
+                            if (stats) {
+                                if (stats.size > lastSize) {
+                                    lastSize = stats.size;
+                                    idleCycles = 0;
+                                } else {
+                                    idleCycles++;
+                                }
+                            } else if (lastSize !== -1) {
+                                // 文件曾存在但现在消失了，说明进程结束
+                                idleCycles = maxIdleCycles;
+                            }
+
+                            if (idleCycles >= maxIdleCycles) {
+                                clearInterval(intervalId);
+                                const fileBuffer = await fs.readFile(tempFilePath).catch(() => null);
+                                let fileContent = '未能读取到后台任务的输出。';
+                                if (fileBuffer) {
+                                    // PowerShell on Windows typically outputs UTF-16LE.
+                                    // Node.js's 'utf16le' decoder will handle the BOM if it exists.
+                                    fileContent = fileBuffer.toString('utf16le');
+                                }
+                                await fs.unlink(tempFilePath).catch(e => console.error(`删除临时文件失败: ${e.message}`));
+                                resolve(fileContent);
+                            }
+                        } catch (error) {
+                            clearInterval(intervalId);
+                            await fs.unlink(tempFilePath).catch(e => console.error(`轮询出错后删除临时文件失败: ${e.message}`));
+                            reject(new Error(`轮询后台任务输出时出错: ${error.message}`));
+                        }
+                    }, pollingInterval);
+                });
+
+                // 只有在轮询结束后，才进行最终的输出
+                console.log(JSON.stringify({ status: 'success', result: output }));
+
             } else {
-                // 同步执行
+                // blocking 模式保持不变
                 const output = await executePowerShellCommand(command, executionType);
                 console.log(JSON.stringify({ status: 'success', result: output }));
             }
