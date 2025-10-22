@@ -37,8 +37,8 @@ class PluginManager {
     async _getDecryptedAuthCode() {
         try {
             const authCodePath = path.join(__dirname, 'Plugin', 'UserAuth', 'code.bin');
-            const encryptedCode = await fs.readFile(authCodePath, 'utf-8');
-            return decryptCode(encryptedCode.trim());
+            // 使用正确的 getAuthCode 函数，并传递文件路径
+            return await getAuthCode(authCodePath);
         } catch (error) {
             if (this.debugMode) {
                 console.error('[PluginManager] Failed to read or decrypt auth code for plugin execution:', error.message);
