@@ -8,8 +8,8 @@ const { getAuthCode} = require('./captchaDecoder'); // 导入统一的解码函�
 async function getRealAuthCode(debugMode = false) {
   try {
     const authCodePath = path.join(__dirname, '..', 'Plugin', 'UserAuth', 'code.bin');
-    const encryptedCode = await fs.readFile(authCodePath, 'utf-8');
-    return decryptCode(encryptedCode.trim());
+    // 使用正确的 getAuthCode 函数，它会自行处理文件读取和解码
+    return await getAuthCode(authCodePath);
   } catch (error) {
     if (debugMode) {
       console.error('[VCPToolCode] Failed to read or decrypt auth code:', error);
