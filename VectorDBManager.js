@@ -832,6 +832,16 @@ class VectorDBManager {
         await Promise.all(preLoadPromises);
         console.log(`[VectorDB] Pre-warmed ${preLoadCount} most frequently used indices.`);
     }
+
+    async shutdown() {
+        console.log('[VectorDB] Shutting down worker pool...');
+        if (this.searchWorkerPool && typeof this.searchWorkerPool.terminate === 'function') {
+            await this.searchWorkerPool.terminate();
+            console.log('[VectorDB] Worker pool shut down successfully.');
+        } else {
+            console.log('[VectorDB] Worker pool not found or does not have a terminate method.');
+        }
+    }
 }
 
 // --- Standalone functions for Worker ---
