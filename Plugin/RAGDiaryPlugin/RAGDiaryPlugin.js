@@ -893,8 +893,11 @@ class RAGDiaryPlugin {
             processingPromises.push((async () => {
                 const diaryConfig = this.ragConfig[dbName] || {};
                 const localThreshold = diaryConfig.threshold || GLOBAL_SIMILARITY_THRESHOLD;
-                const dbNameVector = await this.getSingleEmbedding(dbName);
-                if (!dbNameVector) return { placeholder, content: '' };
+                const dbNameVector = this.vectorDBManager.getDiaryNameVector(dbName); // <--- 使用缓存
+                if (!dbNameVector) {
+                    console.warn(`[RAGDiaryPlugin] Could not find cached vector for diary name: "${dbName}". Skipping.`);
+                    return { placeholder, content: '' };
+                }
 
                 const baseSimilarity = this.cosineSimilarity(queryVector, dbNameVector);
                 const enhancedVector = this.enhancedVectorCache[dbName];
@@ -927,8 +930,11 @@ class RAGDiaryPlugin {
             processingPromises.push((async () => {
                 const diaryConfig = this.ragConfig[dbName] || {};
                 const localThreshold = diaryConfig.threshold || GLOBAL_SIMILARITY_THRESHOLD;
-                const dbNameVector = await this.getSingleEmbedding(dbName);
-                if (!dbNameVector) return { placeholder, content: '' };
+                const dbNameVector = this.vectorDBManager.getDiaryNameVector(dbName); // <--- 使用缓存
+                if (!dbNameVector) {
+                    console.warn(`[RAGDiaryPlugin] Could not find cached vector for diary name: "${dbName}". Skipping.`);
+                    return { placeholder, content: '' };
+                }
 
                 const baseSimilarity = this.cosineSimilarity(queryVector, dbNameVector);
                 const enhancedVector = this.enhancedVectorCache[dbName];
