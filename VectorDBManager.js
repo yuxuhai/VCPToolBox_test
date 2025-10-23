@@ -28,7 +28,7 @@ class SearchCache {
 
     getCacheKey(diaryName, queryVector, k) {
         const vectorHash = crypto.createHash('md5')
-            .update(Buffer.from(queryVector))
+            .update(JSON.stringify(queryVector))
             .digest('hex');
         return `${diaryName}-${vectorHash}-${k}`;
     }
