@@ -2,9 +2,10 @@
 
 ## 概述
 
-TencentCOSBackup是一个功能完整的腾讯云对象存储（COS）插件，为VCP系统提供强大的云存储功能。该插件支持文件上传、下载、复制、移动、删除和列出操作，具有精细的权限控制和自动压缩功能。
+TencentCOSBackup是一个功能完整的腾讯云对象存储（COS）插件，为VCP系统提供强大的云存储功能。该插件支持文件上传、下载、复制、移动、删除和列出操作，具有精细的权限控制、自动压缩功能和病毒检测功能。
 
-**重要限制**：目前只支持部署VCPToolBox的机器的本地文件的备份操作。
+**重要限制**：目前只支持部署VCPToolBox的机器的本地文件的备份操作,如需对VCPChat支持请到VCPChat\VCPDistributedServer\Plugin\ChatTencentcos进行配置
+**病毒检测功能**：无需额外授权和权限检查，支持对COS中的文件和公网文件进行病毒检测。
 
 ## 主要特性
 
@@ -15,6 +16,7 @@ TencentCOSBackup是一个功能完整的腾讯云对象存储（COS）插件，�
 - **权限描述**：自动生成详细的文件夹权限文字描述
 - **错误处理**：完善的错误处理和日志记录
 - **断点续传**：支持大文件的断点续传上传和下载
+- **病毒检测**：支持对COS文件和公网文件进行病毒检测，无需额外授权
 
 ## 安装和配置
 
@@ -133,6 +135,33 @@ AGENT_FOLDERS_CONFIG=agent-data:true:true:true:true:false,agent-temp:true:true:t
 }
 ```
 
+### 提交病毒检测（通过COS文件键）
+
+```json
+{
+  "command": "submit_virus_detection_by_key",
+  "key": "VCPAgentAI/agent-data/通用表情包.txt"
+}
+```
+
+### 提交病毒检测（通过公网文件URL）
+
+```json
+{
+  "command": "submit_virus_detection_by_url",
+  "url": "http://example.com/file.exe"
+}
+```
+
+### 查询病毒检测结果
+
+```json
+{
+  "command": "query_virus_detection",
+  "job_id": "av1234567890abcdef"
+}
+```
+
 ## 权限系统
 
 插件实现了基于文件夹的权限控制系统：
@@ -215,13 +244,13 @@ DEBUG_MODE=true
 ## 版本信息
 
 - **版本**：1.0.0
-- **作者**：VCP Developer
+- **作者**：liukk222
 - **兼容性**：VCP系统
-- **Python要求**：3.7+
-
+- **Python要求**：3.12+
+  
 ## 许可证
 
-本插件遵循VCP项目的许可证条款。
+本插件遵循VCPToolBox项目的许可证条款。
 
 ## 技术支持
 
