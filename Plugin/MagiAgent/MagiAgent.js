@@ -13,6 +13,9 @@ const meetingsDir = path.join(__dirname, 'meetings');
 const magiArtPath = path.join(__dirname, 'magiAI.txt');
 let meetings = {}; // 会议数据的内存缓存
 
+// --- 辅助函数 ---
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 // --- 核心插件接口 (由VCP服务器调用) ---
 
 /**
@@ -214,7 +217,17 @@ async function conductMagiDiscussion(meetingId) {
                 name: pluginConfig[`${model.config}_Model_NAME`]
             };
 
-            const response = await callLanguageModel(modelConfig, meeting.topic, fullDiscussion, systemPrompt);
+            let response;
+            try {
+                response = await callLanguageModel(modelConfig, meeting.topic, fullDiscussion, systemPrompt);
+            } catch (error) {
+                console.error(`[MagiAgent] Skipping model ${model.name} for round ${round + 1} due to persistent API failure.`);
+                const failureNotice = `${modelConfig.header}\n[系统通告: ${model.name} 在本轮未能成功响应，已临时跳过。]\n`;
+                fullDiscussion += failureNotice;
+                meeting.discussionHistory.push({ round: round + 1, model: model.name, statement: failureNotice });
+                await saveMeetingToFile(meeting);
+                continue; // Skip to the next model in the loop
+            }
             const formattedResponse = `${modelConfig.header}\n${response}\n`;
             
             fullDiscussion += formattedResponse;
@@ -269,28 +282,43 @@ async function callLanguageModel(config, topic, history, systemPrompt) {
         { role: 'user', content: `现在轮到你，${config.name}，发言了。请严格按照你的角色设定，开始你的论述：` }
     ];
 
-    try {
-        const response = await axios.post(
-            `${serverConfig.API_URL}/v1/chat/completions`,
-            {
-                model: config.model,
-                messages: messages,
-                max_tokens: config.max_tokens,
-                temperature: config.temperature,
-                stream: false
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${serverConfig.API_Key}`,
-                    'Content-Type': 'application/json'
+    const maxRetries = 3;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const response = await axios.post(
+                `${serverConfig.API_URL}/v1/chat/completions`,
+                {
+                    model: config.model,
+                    messages: messages,
+                    max_tokens: config.max_tokens,
+                    temperature: config.temperature,
+                    stream: false
+                },
+                {
+                    headers: {
+                        'Authorization': `Bearer ${serverConfig.API_Key}`,
+                        'Content-Type': 'application/json'
+                    }
                 }
+            );
+            return response.data.choices[0].message.content.trim();
+        } catch (error) {
+            lastError = error;
+            // 只对网络错误或5xx服务器错误进行重试
+            if (error.response && error.response.status < 500) {
+                console.error(`[MagiAgent] API call to model ${config.model} failed with client error ${error.response.status}, no retry.`);
+                break; // 对于 4xx 类的客户端错误, 不进行重试
             }
-        );
-        return response.data.choices[0].message.content.trim();
-    } catch (error) {
-        console.error(`[MagiAgent] API call to model ${config.model} failed:`, error.response ? error.response.data : error.message);
-        return `[Error: Could not get a response from the model due to an API error.]`;
+            console.warn(`[MagiAgent] API call attempt ${attempt} for model ${config.model} failed. Retrying in ${attempt * 2}s...`, error.message);
+            await delay(attempt * 2000); // 采用指数退避策略 (2s, 4s, 6s)
+        }
     }
+
+    console.error(`[MagiAgent] API call to model ${config.model} failed after ${maxRetries} attempts:`, lastError.response ? lastError.response.data : lastError.message);
+    // 抛出错误而不是返回字符串, 以便上层调用者可以捕获并处理
+    throw new Error(`Failed to get a response from model ${config.model} after ${maxRetries} attempts.`);
 }
 
 // --- 结果格式化 ---
