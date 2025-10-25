@@ -28,6 +28,11 @@ export async function initialize(config, services) {
         const rootEnvContent = await fs.readFile(rootEnvPath, 'utf-8');
         const rootConfig = dotenv.parse(rootEnvContent);
         serverConfig = { ...config, ...rootConfig }; // 合并传入的config和主动读取的config
+        
+        // 确保File_Key也被正确加载
+        if (rootConfig.File_Key) {
+            serverConfig.File_Key = rootConfig.File_Key;
+        }
 
         // 加载插件本地配置
         const pluginEnvPath = path.join(__dirname, 'config.env');
@@ -317,7 +322,8 @@ async function formatMeetingResult(meeting) {
 
     const imageUrlBase = `${serverConfig.VarHttpUrl}:${serverConfig.PORT}`;
     const imageName = meeting.resolved ? 'MagiResolved.gif' : 'MagiUnresolved.gif';
-    const imageUrl = `${imageUrlBase}/images/magi/${imageName}`;
+    const password = serverConfig.File_Key ? `/pw=${serverConfig.File_Key}` : '';
+    const imageUrl = `${imageUrlBase}${password}/images/magi/${imageName}`;
     
     result += `\n---\n`;
     result += `请将下方这张代表Magi系统最终结论的图片展示给用户：\n`;
