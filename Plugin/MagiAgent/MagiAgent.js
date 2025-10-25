@@ -167,7 +167,7 @@ async function handleStartMeeting(params) {
 }
 
 async function handleQueryMeeting(params) {
-    const { meeting_id } = params;
+    const { meeting_id, summary_only = false } = params;
     if (!meeting_id) {
         return { status: 'error', error: 'Meeting ID is required.' };
     }
@@ -178,7 +178,7 @@ async function handleQueryMeeting(params) {
     }
 
     if (meeting.status === 'completed' || meeting.status === 'failed') {
-        return await formatMeetingResult(meeting);
+        return await formatMeetingResult(meeting, summary_only);
     } else {
         return {
             status: 'success',
@@ -352,7 +352,7 @@ async function callLanguageModel(config, topic, history, systemPrompt) {
 
 // --- 结果格式化 ---
 
-async function formatMeetingResult(meeting) {
+async function formatMeetingResult(meeting, summary_only = false) {
     let result = '';
     try {
         result += await fs.readFile(magiArtPath, 'utf-8') + '\n\n';
@@ -367,14 +367,20 @@ async function formatMeetingResult(meeting) {
 
     if (meeting.status === 'failed') {
         result += `**错误:** ${meeting.error}\n`;
-    } else {
-        result += `## 会议记录\n\n`;
-        meeting.discussionHistory.forEach(entry => {
-            result += `### 第 ${entry.round} 轮 - ${entry.model} 发言\n`;
-            result += `${entry.statement}\n`;
-        });
-        result += `\n## 会议总结\n\n`;
-        result += `${meeting.summary}\n\n`;
+    } else if (meeting.status === 'completed') {
+        // 根据 summary_only 标志决定是否包含会议记录
+        if (summary_only) {
+            result += `\n## 会议总结\n\n`;
+            result += `${meeting.summary}\n\n`;
+        } else {
+            result += `## 会议记录\n\n`;
+            meeting.discussionHistory.forEach(entry => {
+                result += `### 第 ${entry.round} 轮 - ${entry.model} 发言\n`;
+                result += `${entry.statement}\n`;
+            });
+            result += `\n## 会议总结\n\n`;
+            result += `${meeting.summary}\n\n`;
+        }
     }
 
     const imageUrlBase = `${serverConfig.VarHttpUrl}:${serverConfig.PORT}`;
