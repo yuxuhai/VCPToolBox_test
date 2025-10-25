@@ -37,6 +37,11 @@ export async function initialize(config, services) {
             serverConfig.File_Key = rootConfig.File_Key;
         }
 
+        // 确保 CALLBACK_BASE_URL 也被正确加载以支持异步回调
+        if (rootConfig.CALLBACK_BASE_URL) {
+            serverConfig.CALLBACK_BASE_URL = rootConfig.CALLBACK_BASE_URL;
+        }
+
         // 加载插件本地配置
         const pluginEnvPath = path.join(__dirname, 'config.env');
         const pluginEnvContent = await fs.readFile(pluginEnvPath, 'utf-8');
@@ -133,16 +138,12 @@ async function handleStartMeeting(params) {
     // 异步执行会议，不阻塞返回
     conductMagiDiscussion(meetingId).catch(async err => {
         console.error(`[MagiAgent] Background meeting task for ${meetingId} failed:`, err);
-        meetings[meetingId].status = 'failed';
-        meetings[meetingId].error = err.message;
-        await saveMeetingToFile(meetings[meetingId]);
-        if (sendVcpLog) {
-            sendVcpLog({
-                type: 'error',
-                source: 'MagiAgent',
-                message: `Magi会议 [${meetingId}] 因错误而意外终止。`
-            });
-        }
+        const meeting = meetings[meetingId];
+        meeting.status = 'failed';
+        meeting.error = err.message;
+        await saveMeetingToFile(meeting);
+        // 发送失败回调通知
+        await sendCompletionCallback(meeting);
     });
 
     if (String(wait_for_result).toLowerCase() === 'true') {
@@ -160,7 +161,7 @@ async function handleStartMeeting(params) {
         // 异步模式
         return {
             status: 'success',
-            result: `Magi meeting (ID: ${meetingId}) has been initiated on the topic: "${topic}". You can query its status later using the ID.`
+            result: `Magi 会议 (ID: ${meetingId}) 已成功提交。\n这是一个动态上下文占位符，当任务完成时，它会被自动替换为实际结果。\n请在你的回复中包含以下占位符原文：{{{{VCP_ASYNC_RESULT::MagiAgent::${meetingId}}}}}`
         };
     }
 }
@@ -260,14 +261,42 @@ async function conductMagiDiscussion(meetingId) {
     // 将会议结果归档为Markdown文件
     await archiveMeetingAsMarkdown(meeting);
 
-    // 发送VCPLog通知
-    if (sendVcpLog) {
-        sendVcpLog({
-            type: 'info',
-            source: 'MagiAgent',
-            message: `Magi会议 [${meetingId}] 已完成。主题: "${meeting.topic}"`,
-            details: `您可以立即使用 query_meeting 命令查询最终结果。`
+    // 发送任务完成的回调通知
+    await sendCompletionCallback(meeting);
+}
+
+async function sendCompletionCallback(meeting) {
+    if (!serverConfig.CALLBACK_BASE_URL) {
+        console.error(`[MagiAgent] CALLBACK_BASE_URL not configured. Cannot send completion notification for meeting ${meeting.id}.`);
+        if (sendVcpLog) {
+             sendVcpLog({
+                type: 'warning',
+                source: 'MagiAgent',
+                message: `会议 [${meeting.id}] 完成，但因未配置CALLBACK_BASE_URL而无法发送前端通知。`
+            });
+        }
+        return;
+    }
+
+    const callbackUrl = `${serverConfig.CALLBACK_BASE_URL}/MagiAgent/${meeting.id}`;
+    try {
+        const resultPayload = await formatMeetingResult(meeting);
+
+        const callbackPayload = {
+            requestId: meeting.id,
+            pluginName: 'MagiAgent',
+            status: meeting.status === 'completed' ? 'Succeed' : 'Failed',
+            message: resultPayload.result,
+            ...(meeting.status === 'failed' && { reason: meeting.error })
+        };
+
+        console.log(`[MagiAgent] Sending completion callback for meeting ${meeting.id} to ${callbackUrl}`);
+        await axios.post(callbackUrl, callbackPayload, {
+            headers: { 'Content-Type': 'application/json' }
         });
+        console.log(`[MagiAgent] Callback for meeting ${meeting.id} sent successfully.`);
+    } catch (error) {
+        console.error(`[MagiAgent] Failed to send completion callback for meeting ${meeting.id}:`, error.message);
     }
 }
 
