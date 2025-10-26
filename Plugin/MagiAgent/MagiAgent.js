@@ -1,29 +1,26 @@
-import fs from 'fs/promises';
-import path from 'path';
-import dotenv from 'dotenv';
-import axios from 'axios';
-import { fileURLToPath } from 'url';
+const fs = require('fs/promises');
+const path = require('path');
+const dotenv = require('dotenv');
+const axios = require('axios');
+// 在 CJS 环境中，__dirname 是全局可用的。
 
 // --- 全局变量和配置 ---
 let serverConfig = {}; // 存储来自VCP主服务器的配置
 let pluginConfig = {}; // 存储此插件目录下的 config.env
 let sendVcpLog; // 用于发送VCPLog通知的函数
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// 移除 ESM 的 __dirname 定义，直接使用 CJS 全局变量
 const meetingsDir = path.join(__dirname, 'meetings');
 const magiArtPath = path.join(__dirname, 'magiAI.txt');
 let meetings = {}; // 会议数据的内存缓存
-
 // --- 辅助函数 ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-
 // --- 核心插件接口 (由VCP服务器调用) ---
-
 /**
  * 初始化函数，在VCP服务器加载插件时调用一次
  * @param {object} config - VCP主服务器的全局配置
  * @param {object} services - VCP主服务器提供的服务函数
  */
-export async function initialize(config, services) {
+async function initialize(config, services) { // 移除了 export
     sendVcpLog = services.sendVcpLog; // 从主服务获取VCPLog发送函数
     try {
         // 主动读取主服务器根目录的config.env
@@ -36,17 +33,14 @@ export async function initialize(config, services) {
         if (rootConfig.File_Key) {
             serverConfig.File_Key = rootConfig.File_Key;
         }
-
         // 确保 CALLBACK_BASE_URL 也被正确加载以支持异步回调
         if (rootConfig.CALLBACK_BASE_URL) {
             serverConfig.CALLBACK_BASE_URL = rootConfig.CALLBACK_BASE_URL;
         }
-
         // 加载插件本地配置
         const pluginEnvPath = path.join(__dirname, 'config.env');
         const pluginEnvContent = await fs.readFile(pluginEnvPath, 'utf-8');
         pluginConfig = dotenv.parse(pluginEnvContent);
-
         await fs.mkdir(meetingsDir, { recursive: true }); // 确保会议目录存在
         await loadMeetingsFromFiles();
         console.log('[MagiAgent] Plugin initialized successfully by reading root config.');
@@ -54,13 +48,12 @@ export async function initialize(config, services) {
         console.error('[MagiAgent] Error during initialization:', error);
     }
 }
-
 /**
  * 工具调用处理函数，AI每次调用插件时执行
  * @param {object} args - AI传递的工具参数
  * @returns {Promise<object>} - 返回给AI的结果
  */
-export async function processToolCall(args) {
+async function processToolCall(args) { // 移除了 export
     const { command, ...params } = args;
     try {
         switch (command) {
@@ -76,9 +69,7 @@ export async function processToolCall(args) {
         return { status: 'error', error: error.message || 'An unknown error occurred.' };
     }
 }
-
 // --- 持久化逻辑 ---
-
 async function loadMeetingsFromFiles() {
     try {
         const files = await fs.readdir(meetingsDir);
@@ -95,7 +86,6 @@ async function loadMeetingsFromFiles() {
         meetings = {};
     }
 }
-
 async function saveMeetingToFile(meeting) {
     if (!meeting || !meeting.id) return;
     try {
@@ -105,9 +95,7 @@ async function saveMeetingToFile(meeting) {
         console.error(`[MagiAgent] Failed to save meeting ${meeting.id}.json:`, error);
     }
 }
-
 // --- 命令处理逻辑 ---
-
 async function handleStartMeeting(params) {
     const { topic, wait_for_result = false, maidname } = params;
     
@@ -116,11 +104,9 @@ async function handleStartMeeting(params) {
     if (isNaN(rounds) || rounds <= 0) {
         rounds = 5;
     }
-
     if (!topic) {
         return { status: 'error', error: 'Meeting topic is required.' };
     }
-
     const meetingId = `magi-session-${Date.now()}`;
     meetings[meetingId] = {
         id: meetingId,
@@ -134,7 +120,6 @@ async function handleStartMeeting(params) {
         resolved: false
     };
     await saveMeetingToFile(meetings[meetingId]);
-
     // 异步执行会议，不阻塞返回
     conductMagiDiscussion(meetingId).catch(async err => {
         console.error(`[MagiAgent] Background meeting task for ${meetingId} failed:`, err);
@@ -145,7 +130,6 @@ async function handleStartMeeting(params) {
         // 发送失败回调通知
         await sendCompletionCallback(meeting);
     });
-
     if (String(wait_for_result).toLowerCase() === 'true') {
         // 同步等待模式
         await new Promise(resolve => {
@@ -165,18 +149,15 @@ async function handleStartMeeting(params) {
         };
     }
 }
-
 async function handleQueryMeeting(params) {
     const { meeting_id, summary_only = false } = params;
     if (!meeting_id) {
         return { status: 'error', error: 'Meeting ID is required.' };
     }
-
     const meeting = meetings[meeting_id];
     if (!meeting) {
         return { status: 'error', error: `Meeting with ID ${meeting_id} not found.` };
     }
-
     if (meeting.status === 'completed' || meeting.status === 'failed') {
         return await formatMeetingResult(meeting, summary_only);
     } else {
@@ -186,23 +167,18 @@ async function handleQueryMeeting(params) {
         };
     }
 }
-
 // --- Magi 会议核心流程 ---
-
 async function conductMagiDiscussion(meetingId) {
     const meeting = meetings[meetingId];
     const maidname = meeting.maidname;
     const systemPrompt = pluginConfig['MAGI_SYSTEM_PROMPT'].replace(/{{MAIDNAME}}/g, maidname);
-
     const magiModels = [
         { name: 'MELCHIOR', config: 'MELCHIOR' },
         { name: 'BALTHASAR', config: 'BALTHASAR' },
         { name: 'CASPER', config: 'CASPER' }
     ];
-
     let activeModels = [...magiModels];
     let fullDiscussion = `会议主题: ${meeting.topic}\n\n`;
-
     for (let round = 0; round < meeting.rounds && activeModels.length > 1; round++) {
         const roundHeader = `\n--- 第 ${round + 1} 轮讨论 ---\n`;
         fullDiscussion += roundHeader;
@@ -217,7 +193,6 @@ async function conductMagiDiscussion(meetingId) {
                 header: pluginConfig[`${model.config}_Model_Header`],
                 name: pluginConfig[`${model.config}_Model_NAME`]
             };
-
             let response;
             try {
                 response = await callLanguageModel(modelConfig, meeting.topic, fullDiscussion, systemPrompt);
@@ -234,7 +209,6 @@ async function conductMagiDiscussion(meetingId) {
             fullDiscussion += formattedResponse;
             meeting.discussionHistory.push({ round: round + 1, model: model.name, statement: formattedResponse });
             await saveMeetingToFile(meeting);
-
             if (response.includes('[Jud&Tes]')) {
                 fullDiscussion += `[系统提示: ${model.name} 已同意观点并退出会议.]\n`;
                 activeModels.splice(i, 1);
@@ -242,7 +216,6 @@ async function conductMagiDiscussion(meetingId) {
             }
         }
     }
-
     // 总结会议
     const summaryConfig = {
         model: pluginConfig['Magi_Summarize_Model'],
@@ -251,7 +224,6 @@ async function conductMagiDiscussion(meetingId) {
         prompt: pluginConfig['Magi_Summarize_Model_PROMPT'].replace(/{{MAIDNAME}}/g, maidname),
         footer: pluginConfig['Magi_Summarize_Model_Footer']
     };
-
     const summary = await callLanguageModel(summaryConfig, meeting.topic, fullDiscussion);
     meeting.summary = `${summary}\n\n${summaryConfig.footer}`;
     meeting.resolved = true; // 假设只要能出总结就是解决了
@@ -260,11 +232,9 @@ async function conductMagiDiscussion(meetingId) {
     
     // 将会议结果归档为Markdown文件
     await archiveMeetingAsMarkdown(meeting);
-
     // 发送任务完成的回调通知
     await sendCompletionCallback(meeting);
 }
-
 async function sendCompletionCallback(meeting) {
     if (!serverConfig.CALLBACK_BASE_URL) {
         console.error(`[MagiAgent] CALLBACK_BASE_URL not configured. Cannot send completion notification for meeting ${meeting.id}.`);
@@ -277,11 +247,9 @@ async function sendCompletionCallback(meeting) {
         }
         return;
     }
-
     const callbackUrl = `${serverConfig.CALLBACK_BASE_URL}/MagiAgent/${meeting.id}`;
     try {
         const resultPayload = await formatMeetingResult(meeting);
-
         const callbackPayload = {
             requestId: meeting.id,
             pluginName: 'MagiAgent',
@@ -289,7 +257,6 @@ async function sendCompletionCallback(meeting) {
             message: resultPayload.result,
             ...(meeting.status === 'failed' && { reason: meeting.error })
         };
-
         console.log(`[MagiAgent] Sending completion callback for meeting ${meeting.id} to ${callbackUrl}`);
         await axios.post(callbackUrl, callbackPayload, {
             headers: { 'Content-Type': 'application/json' }
@@ -299,9 +266,7 @@ async function sendCompletionCallback(meeting) {
         console.error(`[MagiAgent] Failed to send completion callback for meeting ${meeting.id}:`, error.message);
     }
 }
-
 // --- AI 模型调用 ---
-
 async function callLanguageModel(config, topic, history, systemPrompt) {
     const finalSystemPrompt = `${systemPrompt}\n\n${config.prompt}`;
     const messages = [
@@ -310,10 +275,8 @@ async function callLanguageModel(config, topic, history, systemPrompt) {
         { role: 'user', content: `Here is the discussion history so far:\n${history}` },
         { role: 'user', content: `现在轮到你，${config.name}，发言了。请严格按照你的角色设定，开始你的论述：` }
     ];
-
     const maxRetries = 3;
     let lastError = null;
-
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const response = await axios.post(
@@ -344,14 +307,11 @@ async function callLanguageModel(config, topic, history, systemPrompt) {
             await delay(attempt * 2000); // 采用指数退避策略 (2s, 4s, 6s)
         }
     }
-
     console.error(`[MagiAgent] API call to model ${config.model} failed after ${maxRetries} attempts:`, lastError.response ? lastError.response.data : lastError.message);
     // 抛出错误而不是返回字符串, 以便上层调用者可以捕获并处理
     throw new Error(`Failed to get a response from model ${config.model} after ${maxRetries} attempts.`);
 }
-
 // --- 结果格式化 ---
-
 async function formatMeetingResult(meeting, summary_only = false) {
     let result = '';
     try {
@@ -359,12 +319,10 @@ async function formatMeetingResult(meeting, summary_only = false) {
     } catch (e) {
         result += '--- MAGI SYSTEM REPORT ---\n\n';
     }
-
     result += `# Magi 会议报告\n\n`;
     result += `**会议ID:** \`${meeting.id}\`\n`;
     result += `**主题:** ${meeting.topic}\n`;
     result += `**状态:** ${meeting.status}\n\n`;
-
     if (meeting.status === 'failed') {
         result += `**错误:** ${meeting.error}\n`;
     } else if (meeting.status === 'completed') {
@@ -382,7 +340,6 @@ async function formatMeetingResult(meeting, summary_only = false) {
             result += `${meeting.summary}\n\n`;
         }
     }
-
     const imageUrlBase = `${serverConfig.VarHttpUrl}:${serverConfig.PORT}`;
     const imageName = meeting.resolved ? 'MagiResolved.gif' : 'MagiUnresolved.gif';
     const password = serverConfig.File_Key ? `/pw=${serverConfig.File_Key}` : '';
@@ -391,33 +348,25 @@ async function formatMeetingResult(meeting, summary_only = false) {
     result += `\n---\n`;
     result += `请将下方这张代表Magi系统最终结论的图片展示给用户：\n`;
     result += `<img src="${imageUrl}" alt="Magi Status" width="300">\n`;
-
     return { status: 'success', result: result };
 }
-
 // --- 归档逻辑 ---
-
 async function archiveMeetingAsMarkdown(meeting) {
     if (!meeting || meeting.status !== 'completed') return;
-
     try {
         const archiveDir = path.resolve(__dirname, '../../file/document/magi');
         await fs.mkdir(archiveDir, { recursive: true });
-
         // 创建一个对文件名安全的主题
         const safeTopic = meeting.topic.replace(/[\\?%*:|"<>]/g, '-').substring(0, 50);
         const fileName = `${meeting.id}_${safeTopic}.md`;
         const filePath = path.join(archiveDir, fileName);
-
         const markdownContent = await generateMarkdownReport(meeting);
         await fs.writeFile(filePath, markdownContent);
-
         console.log(`[MagiAgent] Meeting ${meeting.id} archived successfully to ${filePath}`);
     } catch (error) {
         console.error(`[MagiAgent] Failed to archive meeting ${meeting.id}:`, error);
     }
 }
-
 async function generateMarkdownReport(meeting) {
     let report = '';
     try {
@@ -425,22 +374,24 @@ async function generateMarkdownReport(meeting) {
     } catch (e) {
         report += '--- MAGI SYSTEM REPORT ---\n\n';
     }
-
     report += `# Magi 会议报告\n\n`;
     report += `**会议ID:** \`${meeting.id}\`\n`;
     report += `**主题:** ${meeting.topic}\n`;
     report += `**状态:** ${meeting.status}\n`;
     report += `**发起人:** ${meeting.maidname}\n`;
     report += `**开始时间:** ${meeting.startTime}\n\n`;
-
     report += `## 会议记录\n\n`;
     meeting.discussionHistory.forEach(entry => {
         report += `### 第 ${entry.round} 轮 - ${entry.model} 发言\n`;
         report += `\`\`\`\n${entry.statement}\n\`\`\`\n\n`;
     });
-
     report += `## 会议总结\n\n`;
     report += `${meeting.summary}\n`;
-
     return report;
 }
+
+// 核心导出，供 CJS 加载器使用
+module.exports = {
+    initialize,
+    processToolCall
+};
