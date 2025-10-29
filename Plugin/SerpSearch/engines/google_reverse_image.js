@@ -35,6 +35,31 @@ async function search(parameters, apiKey) {
     let imageUrl = parameters.image_url || parameters.url;
     let urlWasGenerated = false; // Flag to indicate if we created a temporary public URL
 
+    // Pre-processing: Check for local/intranet IP URLs and convert them to a public proxy URL.
+    if (imageUrl && imageUrl.startsWith('http://')) {
+        try {
+            const urlObject = new URL(imageUrl);
+            // Regex to check if the hostname is an IP address (IPv4 or IPv6)
+            const ipRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$|^\[([0-9a-fA-F:]+)\]$/;
+            if (ipRegex.test(urlObject.hostname) || urlObject.hostname === 'localhost') {
+                const varHttpsUrl = process.env.VarHttpsUrl;
+                const fileKey = process.env.File_Key;
+
+                if (!varHttpsUrl || !fileKey) {
+                    throw new Error("Server configuration 'VarHttpsUrl' or 'File_Key' is missing for proxying local URL.");
+                }
+                
+                // The server should have a route like /proxy/ that takes the encoded original URL
+                const encodedOriginalUrl = encodeURIComponent(imageUrl);
+                imageUrl = `${varHttpsUrl}/pw=${fileKey}/proxy/${encodedOriginalUrl}`;
+                console.log(`[SerpSearch] Converted local IP URL to public proxy URL: ${imageUrl}`);
+            }
+        } catch (e) {
+            // If URL parsing fails, it's not a standard URL, let it pass through.
+            console.warn(`[SerpSearch] Could not parse potential local URL: ${imageUrl}. Error: ${e.message}`);
+        }
+    }
+
     // 1. Handle base64 data passed back after Hyper-Stack-Trace (Highest Priority)
     if (parameters.image_base64) {
         try {
