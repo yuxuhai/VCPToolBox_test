@@ -733,6 +733,62 @@ body {
     box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4);
 }
 
+/* ==================== 内联确认面板 ==================== */
+.inline-confirm-panel {
+    margin-top: 15px;
+    padding: 20px;
+    background: linear-gradient(135deg, #1e293b, #7f1d1d);
+    border: 2px solid #dc2626;
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(220, 38, 38, 0.3);
+    animation: slideDown 0.3s ease-out;
+}
+
+.inline-confirm-title {
+    color: #fecaca;
+    font-weight: 600;
+    font-size: 1.1em;
+    margin-bottom: 12px;
+}
+
+.inline-confirm-message {
+    color: #fecaca;
+    font-size: 0.95em;
+    line-height: 1.6;
+    margin-bottom: 15px;
+    padding: 12px;
+    background: rgba(220, 38, 38, 0.1);
+    border-radius: 6px;
+}
+
+.inline-confirm-message strong {
+    color: #fef2f2;
+    font-weight: 700;
+}
+
+.inline-confirm-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+}
+
+.btn-danger-confirm {
+    padding: 10px 20px;
+    background: linear-gradient(135deg, #dc2626, #b91c1c);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 0.95em;
+}
+
+.btn-danger-confirm:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(220, 38, 38, 0.5);
+}
+
 /* ==================== 加载遮罩 ==================== */
 .loading-overlay {
     position: fixed;

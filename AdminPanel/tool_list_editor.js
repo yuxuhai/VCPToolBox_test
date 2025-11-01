@@ -580,15 +580,67 @@
         showStatus('已创建新配置: ' + configName + ' (请记得点击保存)', 'success');
     }
 
-    // 删除配置
+    // 删除配置 - 修改为展开小窗形式
     async function deleteConfig() {
         const configName = elements.configSelect.value;
         if (!configName) return;
 
-        if (!confirm(`确定要删除配置文件 "${configName}" 吗？此操作不可恢复。`)) {
+        // 检查是否已经有确认面板展开
+        let existingPanel = document.querySelector('.inline-confirm-panel');
+        if (existingPanel) {
+            existingPanel.remove();
             return;
         }
-
+        
+        // 创建内联确认面板
+        const confirmPanel = document.createElement('div');
+        confirmPanel.className = 'inline-confirm-panel';
+        
+        const title = document.createElement('div');
+        title.className = 'inline-confirm-title';
+        title.textContent = '⚠️ 确认删除配置';
+        
+        const message = document.createElement('div');
+        message.className = 'inline-confirm-message';
+        message.innerHTML = `您确定要删除配置文件 <strong>"${configName}"</strong> 吗？<br>此操作不可恢复！`;
+        
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'inline-confirm-actions';
+        
+        const confirmBtn = document.createElement('button');
+        confirmBtn.className = 'btn-danger-confirm';
+        confirmBtn.textContent = '🗑️ 确认删除';
+        confirmBtn.addEventListener('click', async () => {
+            confirmPanel.remove();
+            await executeDeleteConfig(configName);
+        });
+        
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn-cancel-inline';
+        cancelBtn.textContent = '✖ 取消';
+        cancelBtn.addEventListener('click', () => {
+            confirmPanel.remove();
+        });
+        
+        actionsDiv.appendChild(confirmBtn);
+        actionsDiv.appendChild(cancelBtn);
+        
+        confirmPanel.appendChild(title);
+        confirmPanel.appendChild(message);
+        confirmPanel.appendChild(actionsDiv);
+        
+        // 将确认面板插入到配置管理区域
+        const configManager = document.querySelector('.config-manager');
+        configManager.appendChild(confirmPanel);
+        
+        // 滚动到确认面板位置
+        setTimeout(() => {
+            confirmPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 100);
+    }
+    
+    // 执行删除配置的实际操作
+    async function executeDeleteConfig(configName) {
         showLoading(true);
         try {
             const response = await fetch(`${API_BASE}/tool-list-editor/config/${encodeURIComponent(configName)}`, {
