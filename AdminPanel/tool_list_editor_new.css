@@ -492,43 +492,40 @@ body {
     box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
 }
 
-/* ==================== 编辑对话框 ==================== */
-.edit-description-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.8);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10000;
-    backdrop-filter: blur(4px);
+/* ==================== 内联编辑器面板 ==================== */
+.inline-editor-panel {
+    margin-top: 12px;
+    padding: 15px;
+    background: linear-gradient(135deg, #0f172a, #1e1b4b);
+    border: 2px solid #6366f1;
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.3);
+    animation: slideDown 0.3s ease-out;
 }
 
-.edit-description-dialog {
-    background: #1e293b;
-    border: 2px solid #334155;
-    border-radius: 12px;
-    padding: 25px;
-    max-width: 800px;
-    width: 90%;
-    max-height: 80vh;
-    display: flex;
-    flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
-.edit-description-dialog h3 {
+.inline-editor-title {
     color: #f1f5f9;
-    margin: 0 0 15px 0;
-    font-size: 1.3em;
+    font-weight: 600;
+    font-size: 1em;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(99, 102, 241, 0.3);
 }
 
-.edit-description-dialog textarea {
-    flex: 1;
-    min-height: 300px;
+.inline-editor-textarea {
+    width: 100%;
+    min-height: 200px;
     padding: 12px;
     border: 2px solid #334155;
     border-radius: 8px;
@@ -538,22 +535,25 @@ body {
     font-size: 0.9em;
     line-height: 1.5;
     resize: vertical;
+    box-sizing: border-box;
+    transition: border-color 0.3s;
 }
 
-.edit-description-dialog textarea:focus {
+.inline-editor-textarea:focus {
     outline: none;
     border-color: #6366f1;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
 }
 
-.edit-description-dialog .dialog-actions {
+.inline-editor-actions {
     display: flex;
     gap: 10px;
-    margin-top: 15px;
+    margin-top: 12px;
     justify-content: flex-end;
 }
 
-.edit-description-dialog .btn-save {
-    padding: 10px 24px;
+.btn-save-inline {
+    padding: 8px 18px;
     background: linear-gradient(135deg, #10b981, #059669);
     color: white;
     border: none;
@@ -561,15 +561,16 @@ body {
     font-weight: 600;
     cursor: pointer;
     transition: all 0.2s;
+    font-size: 0.9em;
 }
 
-.edit-description-dialog .btn-save:hover {
+.btn-save-inline:hover {
     transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
 }
 
-.edit-description-dialog .btn-cancel {
-    padding: 10px 24px;
+.btn-cancel-inline {
+    padding: 8px 18px;
     background: #334155;
     color: #e2e8f0;
     border: none;
@@ -577,10 +578,159 @@ body {
     font-weight: 600;
     cursor: pointer;
     transition: all 0.2s;
+    font-size: 0.9em;
 }
 
-.edit-description-dialog .btn-cancel:hover {
+.btn-cancel-inline:hover {
     background: #475569;
+}
+
+/* ==================== 内联查看器面板 ==================== */
+.inline-viewer-panel {
+    margin-top: 12px;
+    padding: 15px;
+    background: linear-gradient(135deg, #0f172a, #1e3a5f);
+    border: 2px solid #0ea5e9;
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(14, 165, 233, 0.3);
+    animation: slideDown 0.3s ease-out;
+}
+
+.inline-viewer-title {
+    color: #f1f5f9;
+    font-weight: 600;
+    font-size: 1em;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(14, 165, 233, 0.3);
+}
+
+.inline-viewer-content {
+    padding: 12px;
+    background: #0f172a;
+    border-radius: 8px;
+    color: #cbd5e1;
+    font-size: 0.9em;
+    line-height: 1.6;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    margin-bottom: 12px;
+}
+
+.inline-viewer-content::-webkit-scrollbar {
+    width: 6px;
+}
+
+.inline-viewer-content::-webkit-scrollbar-track {
+    background: #1e293b;
+    border-radius: 3px;
+}
+
+.inline-viewer-content::-webkit-scrollbar-thumb {
+    background: #475569;
+    border-radius: 3px;
+}
+
+.inline-viewer-content::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
+}
+
+.btn-close-inline {
+    padding: 8px 18px;
+    background: #334155;
+    color: #e2e8f0;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 0.9em;
+    width: 100%;
+}
+
+.btn-close-inline:hover {
+    background: #475569;
+}
+
+/* ==================== 内联表单面板 ==================== */
+.inline-form-panel {
+    margin-top: 15px;
+    padding: 20px;
+    background: linear-gradient(135deg, #1e293b, #312e81);
+    border: 2px solid #8b5cf6;
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(139, 92, 246, 0.3);
+    animation: slideDown 0.3s ease-out;
+}
+
+.inline-form-title {
+    color: #f1f5f9;
+    font-weight: 600;
+    font-size: 1.1em;
+    margin-bottom: 8px;
+}
+
+.inline-form-description {
+    color: #cbd5e1;
+    font-size: 0.9em;
+    margin-bottom: 12px;
+    line-height: 1.5;
+}
+
+.inline-form-input {
+    width: 100%;
+    padding: 12px 15px;
+    border: 2px solid #334155;
+    border-radius: 8px;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-size: 1em;
+    line-height: 1.5;
+    box-sizing: border-box;
+    transition: border-color 0.3s;
+    font-family: inherit;
+}
+
+.inline-form-input:focus {
+    outline: none;
+    border-color: #8b5cf6;
+    box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.1);
+}
+
+.inline-form-error {
+    color: #f87171;
+    font-size: 0.9em;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: rgba(248, 113, 113, 0.1);
+    border-radius: 6px;
+    border-left: 3px solid #f87171;
+}
+
+.inline-form-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 15px;
+    justify-content: flex-end;
+}
+
+.btn-confirm-inline {
+    padding: 10px 20px;
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 0.95em;
+}
+
+.btn-confirm-inline:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4);
 }
 
 /* ==================== 加载遮罩 ==================== */

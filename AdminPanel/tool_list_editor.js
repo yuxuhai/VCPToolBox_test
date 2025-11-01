@@ -195,67 +195,121 @@
         enableSaveButtons();
     }
 
-    // 编辑工具说明
+    // 编辑工具说明 - 修改为展开小窗形式
     function editToolDescription(tool) {
+        const toolItem = elements.toolsList.querySelector(`[data-tool-name="${tool.name}"]`);
+        if (!toolItem) return;
+        
+        // 检查是否已经有编辑器展开
+        let editor = toolItem.querySelector('.inline-editor-panel');
+        if (editor) {
+            // 如果已展开，则关闭
+            editor.remove();
+            return;
+        }
+        
         const currentDesc = toolDescriptions[tool.name] || tool.description || '';
         
-        const overlay = document.createElement('div');
-        overlay.className = 'edit-description-overlay';
+        // 创建内联编辑器面板
+        editor = document.createElement('div');
+        editor.className = 'inline-editor-panel';
         
-        const dialog = document.createElement('div');
-        dialog.className = 'edit-description-dialog';
-        
-        const title = document.createElement('h3');
-        title.textContent = `编辑工具说明: ${tool.displayName || tool.name}`;
+        const title = document.createElement('div');
+        title.className = 'inline-editor-title';
+        title.textContent = `✏️ 编辑工具说明: ${tool.displayName || tool.name}`;
         
         const textarea = document.createElement('textarea');
+        textarea.className = 'inline-editor-textarea';
         textarea.value = currentDesc;
         
         const actionsDiv = document.createElement('div');
-        actionsDiv.className = 'dialog-actions';
+        actionsDiv.className = 'inline-editor-actions';
         
         const saveBtn = document.createElement('button');
-        saveBtn.className = 'btn-save';
-        saveBtn.textContent = '保存';
+        saveBtn.className = 'btn-save-inline';
+        saveBtn.textContent = '💾 保存';
         saveBtn.addEventListener('click', () => {
             toolDescriptions[tool.name] = textarea.value;
-            document.body.removeChild(overlay);
             
             // 更新工具项显示
-            const toolItem = elements.toolsList.querySelector(`[data-tool-name="${tool.name}"]`);
-            if (toolItem) {
-                const descDiv = toolItem.querySelector('.tool-description');
-                const newDesc = textarea.value;
-                descDiv.textContent = newDesc.substring(0, 200) + (newDesc.length > 200 ? '...' : '');
-            }
+            const descDiv = toolItem.querySelector('.tool-description');
+            const newDesc = textarea.value;
+            descDiv.textContent = newDesc.substring(0, 200) + (newDesc.length > 200 ? '...' : '');
             
+            editor.remove();
             updatePreview();
             enableSaveButtons();
         });
         
         const cancelBtn = document.createElement('button');
-        cancelBtn.className = 'btn-cancel';
-        cancelBtn.textContent = '取消';
+        cancelBtn.className = 'btn-cancel-inline';
+        cancelBtn.textContent = '✖ 取消';
         cancelBtn.addEventListener('click', () => {
-            document.body.removeChild(overlay);
+            editor.remove();
         });
         
         actionsDiv.appendChild(saveBtn);
         actionsDiv.appendChild(cancelBtn);
         
-        dialog.appendChild(title);
-        dialog.appendChild(textarea);
-        dialog.appendChild(actionsDiv);
-        overlay.appendChild(dialog);
+        editor.appendChild(title);
+        editor.appendChild(textarea);
+        editor.appendChild(actionsDiv);
         
-        document.body.appendChild(overlay);
+        // 将编辑器插入到工具项中
+        toolItem.appendChild(editor);
         textarea.focus();
+        
+        // 滚动到编辑器位置
+        setTimeout(() => {
+            editor.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 100);
     }
 
-    // 查看完整说明
+    // 查看完整说明 - 修改为展开小窗形式
     function viewFullDescription(tool) {
+        const toolItem = elements.toolsList.querySelector(`[data-tool-name="${tool.name}"]`);
+        if (!toolItem) return;
+        
+        // 检查是否已经有查看器展开
+        let viewer = toolItem.querySelector('.inline-viewer-panel');
+        if (viewer) {
+            // 如果已展开，则关闭
+            viewer.remove();
+            return;
+        }
+        
         const currentDesc = toolDescriptions[tool.name] || tool.description || '暂无描述';
-        alert(`${tool.displayName || tool.name}\n\n${currentDesc}`);
+        
+        // 创建内联查看器面板
+        viewer = document.createElement('div');
+        viewer.className = 'inline-viewer-panel';
+        
+        const title = document.createElement('div');
+        title.className = 'inline-viewer-title';
+        title.textContent = `📄 完整说明: ${tool.displayName || tool.name}`;
+        
+        const content = document.createElement('div');
+        content.className = 'inline-viewer-content';
+        content.textContent = currentDesc;
+        
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'btn-close-inline';
+        closeBtn.textContent = '✖ 关闭';
+        closeBtn.addEventListener('click', () => {
+            viewer.remove();
+        });
+        
+        viewer.appendChild(title);
+        viewer.appendChild(content);
+        viewer.appendChild(closeBtn);
+        
+        // 将查看器插入到工具项中
+        toolItem.appendChild(viewer);
+        
+        // 滚动到查看器位置
+        setTimeout(() => {
+            viewer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 100);
     }
 
     // 更新工具计数
@@ -383,37 +437,131 @@
         }
     }
 
-    // 创建新配置
+    // 创建新配置 - 修改为展开小窗形式
     async function createNewConfig() {
-        // 使用prompt对话框让用户输入配置文件名
-        const configName = prompt('请输入新配置文件名（只能包含字母、数字、下划线和横线）：', '');
-        
-        if (!configName) {
-            // 用户取消了
+        // 检查是否已经有表单展开
+        let existingForm = document.querySelector('.inline-form-panel');
+        if (existingForm) {
+            existingForm.remove();
             return;
         }
         
-        const trimmedName = configName.trim();
+        // 创建内联表单面板
+        const formPanel = document.createElement('div');
+        formPanel.className = 'inline-form-panel';
         
-        if (!trimmedName) {
-            showStatus('配置文件名不能为空', 'error');
-            return;
-        }
-
-        if (!/^[a-zA-Z0-9_-]+$/.test(trimmedName)) {
-            showStatus('配置文件名只能包含字母、数字、下划线和横线', 'error');
-            return;
-        }
+        const title = document.createElement('div');
+        title.className = 'inline-form-title';
+        title.textContent = '📝 创建新配置文件';
         
-        // 检查是否已存在
-        if (availableConfigs.includes(trimmedName)) {
-            const overwrite = confirm(`配置文件 "${trimmedName}" 已存在，是否覆盖？`);
-            if (!overwrite) {
+        const description = document.createElement('div');
+        description.className = 'inline-form-description';
+        description.textContent = '请输入配置文件名（只能包含字母、数字、下划线和横线）';
+        
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'inline-form-input';
+        input.placeholder = '例如: my_tools_config';
+        input.maxLength = 50;
+        
+        const errorMsg = document.createElement('div');
+        errorMsg.className = 'inline-form-error';
+        errorMsg.style.display = 'none';
+        
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'inline-form-actions';
+        
+        const confirmBtn = document.createElement('button');
+        confirmBtn.className = 'btn-confirm-inline';
+        confirmBtn.textContent = '✓ 创建';
+        confirmBtn.addEventListener('click', async () => {
+            const configName = input.value.trim();
+            
+            if (!configName) {
+                errorMsg.textContent = '❌ 配置文件名不能为空';
+                errorMsg.style.display = 'block';
+                input.focus();
                 return;
             }
-        }
 
-        currentConfigFile = trimmedName;
+            if (!/^[a-zA-Z0-9_-]+$/.test(configName)) {
+                errorMsg.textContent = '❌ 配置文件名只能包含字母、数字、下划线和横线';
+                errorMsg.style.display = 'block';
+                input.focus();
+                return;
+            }
+            
+            // 检查是否已存在
+            if (availableConfigs.includes(configName)) {
+                // 显示覆盖确认
+                errorMsg.textContent = `⚠️ 配置文件 "${configName}" 已存在`;
+                errorMsg.style.display = 'block';
+                errorMsg.style.color = '#f59e0b';
+                
+                // 如果确认按钮已经变成了覆盖按钮，则执行覆盖
+                if (confirmBtn.dataset.confirmOverwrite === 'true') {
+                    // 执行创建
+                    executeCreateConfig(configName);
+                    formPanel.remove();
+                } else {
+                    // 修改按钮为确认覆盖
+                    confirmBtn.textContent = '⚠️ 确认覆盖';
+                    confirmBtn.dataset.confirmOverwrite = 'true';
+                    confirmBtn.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
+                }
+                return;
+            }
+
+            // 执行创建
+            executeCreateConfig(configName);
+            formPanel.remove();
+        });
+        
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn-cancel-inline';
+        cancelBtn.textContent = '✖ 取消';
+        cancelBtn.addEventListener('click', () => {
+            formPanel.remove();
+        });
+        
+        // 输入框变化时重置错误状态和按钮
+        input.addEventListener('input', () => {
+            errorMsg.style.display = 'none';
+            confirmBtn.textContent = '✓ 创建';
+            confirmBtn.dataset.confirmOverwrite = 'false';
+            confirmBtn.style.background = '';
+        });
+        
+        // 回车键提交
+        input.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                confirmBtn.click();
+            }
+        });
+        
+        actionsDiv.appendChild(confirmBtn);
+        actionsDiv.appendChild(cancelBtn);
+        
+        formPanel.appendChild(title);
+        formPanel.appendChild(description);
+        formPanel.appendChild(input);
+        formPanel.appendChild(errorMsg);
+        formPanel.appendChild(actionsDiv);
+        
+        // 将表单插入到配置管理区域
+        const configManager = document.querySelector('.config-manager');
+        configManager.appendChild(formPanel);
+        input.focus();
+        
+        // 滚动到表单位置
+        setTimeout(() => {
+            formPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 100);
+    }
+    
+    // 执行创建配置的实际操作
+    function executeCreateConfig(configName) {
+        currentConfigFile = configName;
         selectedTools = new Set();
         toolDescriptions = {};
         
@@ -423,13 +571,13 @@
         enableSaveButtons();
         
         // 更新下拉框显示当前配置
-        if (!availableConfigs.includes(trimmedName)) {
-            availableConfigs.push(trimmedName);
+        if (!availableConfigs.includes(configName)) {
+            availableConfigs.push(configName);
             renderConfigSelect();
         }
-        elements.configSelect.value = trimmedName;
+        elements.configSelect.value = configName;
         
-        showStatus('已创建新配置: ' + trimmedName + ' (请记得点击保存)', 'success');
+        showStatus('已创建新配置: ' + configName + ' (请记得点击保存)', 'success');
     }
 
     // 删除配置
@@ -509,16 +657,112 @@
         }
     }
 
-    // 导出为txt文件
+    // 导出为txt文件 - 修改为展开小窗形式
     async function exportToTxt() {
         if (selectedTools.size === 0) {
             showStatus('请先选择至少一个工具', 'error');
             return;
         }
 
-        const fileName = prompt('请输入要导出的文件名（不含.txt后缀）:', currentConfigFile || 'ToolList');
-        if (!fileName) return;
+        // 检查是否已经有表单展开
+        let existingForm = document.querySelector('.inline-form-panel');
+        if (existingForm) {
+            existingForm.remove();
+            return;
+        }
+        
+        // 创建内联表单面板
+        const formPanel = document.createElement('div');
+        formPanel.className = 'inline-form-panel';
+        
+        const title = document.createElement('div');
+        title.className = 'inline-form-title';
+        title.textContent = '📤 导出工具列表到TXT';
+        
+        const description = document.createElement('div');
+        description.className = 'inline-form-description';
+        description.textContent = '请输入要导出的文件名（不含.txt后缀）';
+        
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'inline-form-input';
+        input.placeholder = '例如: ToolList';
+        input.value = currentConfigFile || 'ToolList';
+        input.maxLength = 50;
+        
+        const errorMsg = document.createElement('div');
+        errorMsg.className = 'inline-form-error';
+        errorMsg.style.display = 'none';
+        
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'inline-form-actions';
+        
+        const confirmBtn = document.createElement('button');
+        confirmBtn.className = 'btn-confirm-inline';
+        confirmBtn.textContent = '📤 导出';
+        confirmBtn.addEventListener('click', async () => {
+            const fileName = input.value.trim();
+            
+            if (!fileName) {
+                errorMsg.textContent = '❌ 文件名不能为空';
+                errorMsg.style.display = 'block';
+                input.focus();
+                return;
+            }
 
+            if (!/^[a-zA-Z0-9_-]+$/.test(fileName)) {
+                errorMsg.textContent = '❌ 文件名只能包含字母、数字、下划线和横线';
+                errorMsg.style.display = 'block';
+                input.focus();
+                return;
+            }
+            
+            // 执行导出
+            formPanel.remove();
+            await executeExportToTxt(fileName);
+        });
+        
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn-cancel-inline';
+        cancelBtn.textContent = '✖ 取消';
+        cancelBtn.addEventListener('click', () => {
+            formPanel.remove();
+        });
+        
+        // 输入框变化时重置错误状态
+        input.addEventListener('input', () => {
+            errorMsg.style.display = 'none';
+        });
+        
+        // 回车键提交
+        input.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                confirmBtn.click();
+            }
+        });
+        
+        actionsDiv.appendChild(confirmBtn);
+        actionsDiv.appendChild(cancelBtn);
+        
+        formPanel.appendChild(title);
+        formPanel.appendChild(description);
+        formPanel.appendChild(input);
+        formPanel.appendChild(errorMsg);
+        formPanel.appendChild(actionsDiv);
+        
+        // 将表单插入到预览区域
+        const previewSection = document.querySelector('.preview-section');
+        previewSection.insertBefore(formPanel, previewSection.firstChild);
+        input.select(); // 选中默认文件名，方便直接修改
+        
+        // 滚动到表单位置
+        setTimeout(() => {
+            formPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 100);
+    }
+    
+    // 执行导出的实际操作
+    async function executeExportToTxt(fileName) {
         showLoading(true);
         try {
             const configData = {
