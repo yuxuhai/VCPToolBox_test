@@ -318,6 +318,9 @@
             updatePluginSelectButton(pluginName);
         }
         
+        // 更新插件过滤列表中的选中数量
+        updatePluginFilterCounts();
+        
         updateToolCount();
         updatePreview();
         enableSaveButtons();
@@ -392,6 +395,7 @@
         
         // 重新渲染以更新按钮状态
         renderToolsList();
+        updatePluginFilterCounts(); // 更新插件过滤列表的选中数量
         updateToolCount();
         updatePreview();
         enableSaveButtons();
@@ -785,6 +789,7 @@
             
             // 重新渲染工具列表以反映选择状态
             renderToolsList();
+            updatePluginFilterCounts(); // 更新插件过滤列表的选中数量
             updateToolCount();
             updatePreview();
             enableSaveButtons();
@@ -1306,6 +1311,7 @@
     function selectAll() {
         allTools.forEach(tool => selectedTools.add(tool.uniqueId));
         renderToolsList();
+        updatePluginFilterCounts(); // 更新插件过滤列表的选中数量
         updateToolCount();
         updatePreview();
         enableSaveButtons();
@@ -1316,6 +1322,7 @@
     function deselectAll() {
         selectedTools.clear();
         renderToolsList();
+        updatePluginFilterCounts(); // 更新插件过滤列表的选中数量
         updateToolCount();
         updatePreview();
         enableSaveButtons();
@@ -1360,11 +1367,16 @@
             if (!pluginStats[tool.pluginName]) {
                 pluginStats[tool.pluginName] = {
                     displayName: tool.displayName || tool.pluginName,
-                    count: 0,
+                    totalCount: 0,
+                    selectedCount: 0,
                     isInvalid: tool.isInvalid
                 };
             }
-            pluginStats[tool.pluginName].count++;
+            pluginStats[tool.pluginName].totalCount++;
+            // 统计已选中的工具数量
+            if (selectedTools.has(tool.uniqueId)) {
+                pluginStats[tool.pluginName].selectedCount++;
+            }
         });
         
         // 按插件名排序
@@ -1381,6 +1393,7 @@
             
             const item = document.createElement('div');
             item.className = 'plugin-filter-item';
+            item.dataset.pluginName = pluginName; // 添加数据属性方便后续更新
             
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
@@ -1391,7 +1404,7 @@
             label.innerHTML = `
                 <span class="plugin-icon">${stats.isInvalid ? '⚠️' : '📦'}</span>
                 <span class="plugin-name">${stats.displayName}</span>
-                <span class="tool-count">(${stats.count})</span>
+                <span class="tool-count">${stats.selectedCount > 0 ? `<span class="selected-count">${stats.selectedCount}</span>/` : ''}${stats.totalCount}</span>
             `;
             
             // 点击整个item也可以切换复选框
@@ -1426,6 +1439,11 @@
                 const isExpanded = panel.style.display !== 'none';
                 panel.style.display = isExpanded ? 'none' : 'block';
                 toggleBtn.classList.toggle('expanded', !isExpanded);
+                
+                // 如果是展开操作，更新选中数量
+                if (!isExpanded) {
+                    updatePluginFilterCounts();
+                }
             });
         }
         
@@ -1479,6 +1497,44 @@
         
         // 同时应用搜索过滤
         filterTools();
+    }
+    
+    // 更新插件过滤列表中的选中数量
+    function updatePluginFilterCounts() {
+        const pluginFilterList = document.getElementById('plugin-filter-list');
+        if (!pluginFilterList) return;
+        
+        // 统计每个插件的已选中工具数量
+        const pluginSelectedCounts = {};
+        allTools.forEach(tool => {
+            if (!pluginSelectedCounts[tool.pluginName]) {
+                pluginSelectedCounts[tool.pluginName] = {
+                    total: 0,
+                    selected: 0
+                };
+            }
+            pluginSelectedCounts[tool.pluginName].total++;
+            if (selectedTools.has(tool.uniqueId)) {
+                pluginSelectedCounts[tool.pluginName].selected++;
+            }
+        });
+        
+        // 更新每个插件过滤项的显示
+        const items = pluginFilterList.querySelectorAll('.plugin-filter-item');
+        items.forEach(item => {
+            const pluginName = item.dataset.pluginName;
+            if (!pluginName || !pluginSelectedCounts[pluginName]) return;
+            
+            const counts = pluginSelectedCounts[pluginName];
+            const countSpan = item.querySelector('.tool-count');
+            if (countSpan) {
+                if (counts.selected > 0) {
+                    countSpan.innerHTML = `<span class="selected-count">${counts.selected}</span>/${counts.total}`;
+                } else {
+                    countSpan.textContent = counts.total;
+                }
+            }
+        });
     }
 
     // 页面加载完成后初始化
