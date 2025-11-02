@@ -209,37 +209,58 @@ async function fetchWithPuppeteer(url, mode = 'text', proxyPort = null) {
             // 默认的文本提取模式
             await autoScroll(page, mode); // Scroll page to load all lazy-loaded content
 
-            // 优先尝试作为聚合页提取链接
-            const links = await page.evaluate(() => {
-                const anchors = Array.from(document.querySelectorAll('a[href]'));
-                const linkData = anchors.map(anchor => ({
-                    title: anchor.textContent.trim(),
-                    url: anchor.href
-                })).filter(link =>
-                    link.title &&
-                    link.url &&
-                    link.url.startsWith('http') &&
-                    !link.url.startsWith('javascript:')
-                );
+            // 优先尝试作为聚合页提取有分类的链接
+            const groupedLinks = await page.evaluate(() => {
+                // 根据用户反馈，新闻源标题的特征是 'span.text-xl.font-bold'
+                const titleElements = Array.from(document.querySelectorAll('span.text-xl.font-bold'));
+                const results = [];
 
-                // 基于URL去重
-                const uniqueLinks = [];
-                const seenUrls = new Set();
-                for (const link of linkData) {
-                    // 过滤掉非常短的、可能是"更多"之类的导航链接
-                    if (link.title.length > 5 && !seenUrls.has(link.url)) {
-                        seenUrls.add(link.url);
-                        uniqueLinks.push(link);
+                for (const titleEl of titleElements) {
+                    const category = titleEl.textContent.trim();
+                    // 寻找包裹该分类和其链接的最近的 "卡片" 容器
+                    // 这是一个基于典型卡片式布局的推断，对特定网站有效
+                    const container = titleEl.closest('div[class*="rounded"]');
+                    if (!container) continue;
+
+                    const anchors = Array.from(container.querySelectorAll('a[href]'));
+                    const linkData = anchors.map(anchor => ({
+                        title: anchor.textContent.trim(),
+                        url: anchor.href
+                    })).filter(link =>
+                        link.title &&
+                        link.url &&
+                        link.url.startsWith('http') &&
+                        !link.url.startsWith('javascript:') &&
+                        link.title.length > 5 // 过滤掉短的导航链接
+                    );
+                    
+                    // 对分类内部的链接进行去重
+                    const uniqueLinks = [];
+                    const seenUrls = new Set();
+                    for (const link of linkData) {
+                        if (!seenUrls.has(link.url)) {
+                            seenUrls.add(link.url);
+                            uniqueLinks.push(link);
+                        }
+                    }
+
+                    if (uniqueLinks.length > 0) {
+                        results.push({ category, links: uniqueLinks });
                     }
                 }
-                return uniqueLinks;
+                return results;
             });
 
-            // 如果找到了多个链接，格式化为Markdown列表
-            if (links && links.length > 3) {
+            // 如果找到了带分组的链接，格式化为带标题的Markdown列表
+            if (groupedLinks && groupedLinks.length > 0) {
                 const pageTitle = await page.title();
-                const markdownLinks = links.map(link => `- [${link.title}](${link.url})`).join('\n');
-                return `页面标题: ${pageTitle}\n\n发现的链接:\n${markdownLinks}`;
+                let markdownOutput = `页面标题: ${pageTitle}\n\n`;
+                for (const group of groupedLinks) {
+                    markdownOutput += `## ${group.category}\n`;
+                    markdownOutput += group.links.map(link => `- [${link.title}](${link.url})`).join('\n');
+                    markdownOutput += '\n\n';
+                }
+                return markdownOutput.trim();
             }
 
             // 如果链接提取失败或链接很少，则回退到使用Readability提取文章正文
