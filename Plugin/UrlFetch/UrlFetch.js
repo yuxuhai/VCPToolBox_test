@@ -209,7 +209,40 @@ async function fetchWithPuppeteer(url, mode = 'text', proxyPort = null) {
             // 默认的文本提取模式
             await autoScroll(page, mode); // Scroll page to load all lazy-loaded content
 
-            // Use Readability to extract the main content
+            // 优先尝试作为聚合页提取链接
+            const links = await page.evaluate(() => {
+                const anchors = Array.from(document.querySelectorAll('a[href]'));
+                const linkData = anchors.map(anchor => ({
+                    title: anchor.textContent.trim(),
+                    url: anchor.href
+                })).filter(link =>
+                    link.title &&
+                    link.url &&
+                    link.url.startsWith('http') &&
+                    !link.url.startsWith('javascript:')
+                );
+
+                // 基于URL去重
+                const uniqueLinks = [];
+                const seenUrls = new Set();
+                for (const link of linkData) {
+                    // 过滤掉非常短的、可能是"更多"之类的导航链接
+                    if (link.title.length > 5 && !seenUrls.has(link.url)) {
+                        seenUrls.add(link.url);
+                        uniqueLinks.push(link);
+                    }
+                }
+                return uniqueLinks;
+            });
+
+            // 如果找到了多个链接，格式化为Markdown列表
+            if (links && links.length > 3) {
+                const pageTitle = await page.title();
+                const markdownLinks = links.map(link => `- [${link.title}](${link.url})`).join('\n');
+                return `页面标题: ${pageTitle}\n\n发现的链接:\n${markdownLinks}`;
+            }
+
+            // 如果链接提取失败或链接很少，则回退到使用Readability提取文章正文
             const pageContent = await page.content();
             const doc = new JSDOM(pageContent, { url });
             const reader = new Readability(doc.window.document);
@@ -221,7 +254,7 @@ async function fetchWithPuppeteer(url, mode = 'text', proxyPort = null) {
                 return result;
             } else {
                 // Fallback if Readability fails to extract content
-                return "成功获取网页，但无法提取主要内容。";
+                return "成功获取网页，但无法提取主要内容或链接列表。";
             }
         }
     } finally {
