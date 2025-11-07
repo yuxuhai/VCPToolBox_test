@@ -8,7 +8,7 @@ const lunarCalendar = require('chinese-lunar-calendar');
 const PROJECT_BASE_PATH = process.env.PROJECT_BASE_PATH;
 const DEFAULT_TIMEZONE = process.env.DEFAULT_TIMEZONE || 'Asia/Shanghai';
 // 诊断日志：确认时区配置
-console.log(`[TarotDivination] 使用的默认时区: ${DEFAULT_TIMEZONE}`);
+console.error(`[TarotDivination] 使用的默认时区: ${DEFAULT_TIMEZONE}`);
 
 /**
  * 获取指定时区下的时间因子。
@@ -1060,10 +1060,13 @@ async function handleRequest(args) {
     status: 'success',
     result: {
       content: contentForAI,
-      details: processedCards.map((pCard, index) => ({
-        position: positions[index] || `Card ${index + 1}`,
-        ...pCard,
-      })),
+      details: processedCards.map((pCard, index) => {
+        const { image_base64, ...rest } = pCard; // Exclude base64 from details
+        return {
+          position: positions[index] || `Card ${index + 1}`,
+          ...rest,
+        };
+      }),
     },
   };
 }
