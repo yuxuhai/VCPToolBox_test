@@ -1526,33 +1526,47 @@ class RAGDiaryPlugin {
             return null;
         }
 
-        try {
-            const response = await axios.post(`${apiUrl}/v1/embeddings`, {
-                model: embeddingModel,
-                input: [text]
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Content-Type': 'application/json'
-                }
-            });
+        const maxRetries = 3;
+        const retryDelay = 1000; // 1 second
 
-            const vector = response.data?.data?.[0]?.embedding;
-            if (!vector) {
-                console.error('[RAGDiaryPlugin] Valid embedding vector was not found in the API response.');
-                return null;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const response = await axios.post(`${apiUrl}/v1/embeddings`, {
+                    model: embeddingModel,
+                    input: [text]
+                }, {
+                    headers: {
+                        'Authorization': `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const vector = response.data?.data?.[0]?.embedding;
+                if (!vector) {
+                    console.error('[RAGDiaryPlugin] Valid embedding vector was not found in the API response.');
+                    return null; // Do not retry on valid response with no vector
+                }
+                return vector;
+            } catch (error) {
+                const status = error.response ? error.response.status : null;
+                
+                if ((status === 500 || status === 503) && attempt < maxRetries) {
+                    console.warn(`[RAGDiaryPlugin] Embedding API call failed with status ${status}. Attempt ${attempt} of ${maxRetries}. Retrying in ${retryDelay}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, retryDelay));
+                    continue;
+                }
+
+                if (error.response) {
+                    console.error(`[RAGDiaryPlugin] Embedding API call failed with status ${status}: ${JSON.stringify(error.response.data)}`);
+                } else if (error.request) {
+                    console.error('[RAGDiaryPlugin] Embedding API call made but no response received:', error.request);
+                } else {
+                    console.error('[RAGDiaryPlugin] An error occurred while setting up the embedding request:', error.message);
+                }
+                return null; // Return null after final attempt or for non-retriable errors
             }
-            return vector;
-        } catch (error) {
-            if (error.response) {
-                console.error(`[RAGDiaryPlugin] Embedding API call failed with status ${error.response.status}: ${JSON.stringify(error.response.data)}`);
-            } else if (error.request) {
-                console.error('[RAGDiaryPlugin] Embedding API call made but no response received:', error.request);
-            } else {
-                console.error('[RAGDiaryPlugin] An error occurred while setting up the embedding request:', error.message);
-            }
-            return null;
         }
+        return null; // Should not be reached, but as a fallback
     }
 }
 
