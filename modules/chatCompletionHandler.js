@@ -558,6 +558,7 @@ class ChatCompletionHandler {
                       ? JSON.stringify(pluginResult, null, 2)
                       : String(pluginResult)
                     : `插件 ${toolCall.name} 执行完毕，但没有返回明确内容。`;
+                // Archery调用的WebSocket通知应该始终发送，不受中止状态影响
                 webSocketServer.broadcast(
                   {
                     type: 'vcp_log',
@@ -569,7 +570,6 @@ class ChatCompletionHandler {
                     },
                   },
                   'VCPLog',
-                  abortController,
                 );
                 const pluginManifestForStream = pluginManager.getPlugin(toolCall.name);
                 if (
@@ -584,9 +584,9 @@ class ChatCompletionHandler {
                   webSocketServer.broadcast(
                     wsPushMessageStream,
                     pluginManifestForStream.webSocketPush.targetClientType || null,
-                    abortController,
                   );
                 }
+                // 但HTTP流写入仍需检查流状态和中止状态
                 if (shouldShowVCP && !res.writableEnded) {
                   vcpInfoHandler.streamVcpInfo(res, originalBody.model, toolCall.name, 'success', pluginResult, abortController);
                 }
@@ -597,6 +597,7 @@ class ChatCompletionHandler {
                   pluginError.message,
                 );
                 const toolResultText = `执行插件 ${toolCall.name} 时发生错误：${pluginError.message || '未知错误'}`;
+                // Archery调用的WebSocket通知应该始终发送
                 webSocketServer.broadcast(
                   {
                     type: 'vcp_log',
@@ -608,8 +609,8 @@ class ChatCompletionHandler {
                     },
                   },
                   'VCPLog',
-                  abortController,
                 );
+                // 但HTTP流写入仍需检查流状态和中止状态
                 if (shouldShowVCP && !res.writableEnded) {
                   vcpInfoHandler.streamVcpInfo(res, originalBody.model, toolCall.name, 'error', toolResultText, abortController);
                 }
@@ -1000,6 +1001,7 @@ class ChatCompletionHandler {
                         ? JSON.stringify(pluginResult, null, 2)
                         : String(pluginResult)
                       : `插件 ${toolCall.name} 执行完毕，但没有返回明确内容。`;
+                  // Archery调用的WebSocket通知应该始终发送，不受中止状态影响
                   webSocketServer.broadcast(
                     {
                       type: 'vcp_log',
@@ -1011,7 +1013,6 @@ class ChatCompletionHandler {
                       },
                     },
                     'VCPLog',
-                    abortController,
                   );
                   const pluginManifestNonStream = pluginManager.getPlugin(toolCall.name);
                   if (
@@ -1026,9 +1027,9 @@ class ChatCompletionHandler {
                     webSocketServer.broadcast(
                       wsPushMessageNonStream,
                       pluginManifestNonStream.webSocketPush.targetClientType || null,
-                      abortController,
                     );
                   }
+                  // VCP信息收集不涉及HTTP流写入，但仍需检查中止状态以避免污染响应
                   if (shouldShowVCP) {
                     const vcpText = vcpInfoHandler.streamVcpInfo(
                       null,
@@ -1047,6 +1048,7 @@ class ChatCompletionHandler {
                     pluginError.message,
                   );
                   const toolResultText = `执行插件 ${toolCall.name} 时发生错误：${pluginError.message || '未知错误'}`;
+                  // Archery调用的WebSocket通知应该始终发送
                   webSocketServer.broadcast(
                     {
                       type: 'vcp_log',
@@ -1058,8 +1060,8 @@ class ChatCompletionHandler {
                       },
                     },
                     'VCPLog',
-                    abortController,
                   );
+                  // VCP信息收集不涉及HTTP流写入，但仍需检查中止状态
                   if (shouldShowVCP) {
                     const vcpText = vcpInfoHandler.streamVcpInfo(
                       null,
