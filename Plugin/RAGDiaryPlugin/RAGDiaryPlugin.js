@@ -8,6 +8,7 @@ const dotenv = require('dotenv');
 const cheerio = require('cheerio'); // <--- 新增：用于解析和清理HTML
 const TIME_EXPRESSIONS = require('./timeExpressions.config.js');
 const SemanticGroupManager = require('./SemanticGroupManager.js');
+const AIMemoHandler = require('./AIMemoHandler.js'); // <--- 新增：引入AIMemoHandler
 
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
@@ -243,6 +244,7 @@ class RAGDiaryPlugin {
         this.semanticGroups = new SemanticGroupManager(this); // 实例化语义组管理器
         this.metaThinkingChains = {}; // 新增：元思考链配置
         this.metaChainThemeVectors = {}; // 新增：元思考链主题向量缓存
+        this.aiMemoHandler = null; // <--- 延迟初始化，在 loadConfig 之后
         this.loadConfig();
     }
 
@@ -263,6 +265,12 @@ class RAGDiaryPlugin {
         if (this.rerankConfig.url && this.rerankConfig.apiKey && this.rerankConfig.model) {
             console.log('[RAGDiaryPlugin] Rerank feature is configured.');
         }
+
+        // --- 初始化并加载 AIMemo 配置 ---
+        console.log('[RAGDiaryPlugin] Initializing AIMemo handler...');
+        this.aiMemoHandler = new AIMemoHandler(this); // 在环境变量加载后初始化
+        await this.aiMemoHandler.loadConfig();
+        console.log('[RAGDiaryPlugin] AIMemo handler initialized.');
 
         const configPath = path.join(__dirname, 'rag_tags.json');
         const cachePath = path.join(__dirname, 'vector_cache.json');
@@ -707,6 +715,7 @@ class RAGDiaryPlugin {
                 systemMessage.content,
                 queryVector,
                 userContent, // 传递 userContent 用于语义组和时间解析
+                aiContent, // 传递 aiContent 用于 AIMemo
                 combinedQueryForDisplay, // V3.5: 传递组合后的查询字符串用于广播
                 dynamicK,
                 timeRanges,
@@ -720,7 +729,7 @@ class RAGDiaryPlugin {
     }
 
     // V3.0 新增: 处理单条 system 消息内容的辅助函数
-    async _processSingleSystemMessage(content, queryVector, userContent, combinedQueryForDisplay, dynamicK, timeRanges, processedDiaries) {
+    async _processSingleSystemMessage(content, queryVector, userContent, aiContent, combinedQueryForDisplay, dynamicK, timeRanges, processedDiaries) {
         if (!this.pushVcpInfo) {
             console.warn('[RAGDiaryPlugin] _processSingleSystemMessage: pushVcpInfo is null. Cannot broadcast RAG details.');
         }
@@ -730,8 +739,7 @@ class RAGDiaryPlugin {
         const fullTextDeclarations = [...processedContent.matchAll(/<<(.*?)日记本>>/g)];
         const hybridDeclarations = [...processedContent.matchAll(/《《(.*?)日记本(.*?)》》/g)];
         const metaThinkingDeclarations = [...processedContent.matchAll(/\[\[VCP元思考(.*?)\]\]/g)];
-
-        // --- 0. 优先处理 [[VCP元思考...]] 元思考链 ---
+        // --- 1. 处理 [[VCP元思考...]] 元思考链 ---
         for (const match of metaThinkingDeclarations) {
             const placeholder = match[0];
             const modifiersAndParams = match[1] || '';
@@ -831,11 +839,21 @@ class RAGDiaryPlugin {
 
             processingPromises.push((async () => {
                 const modifiers = match[2] || '';
-                const retrievedContent = await this._processRAGPlaceholder({
-                    dbName, modifiers, queryVector, userContent, combinedQueryForDisplay,
-                    dynamicK, timeRanges, allowTimeAndGroup: true
-                });
-                return { placeholder, content: retrievedContent };
+                if (modifiers.includes('::AIMemo')) {
+                    // --- AIMemo Path ---
+                    console.log(`[RAGDiaryPlugin] Detected AIMemo modifier for: ${dbName}`);
+                    const retrievedContent = await this.aiMemoHandler.processAIMemo(
+                        dbName, userContent, aiContent, combinedQueryForDisplay
+                    );
+                    return { placeholder, content: retrievedContent };
+                } else {
+                    // --- Standard RAG Path ---
+                    const retrievedContent = await this._processRAGPlaceholder({
+                        dbName, modifiers, queryVector, userContent, combinedQueryForDisplay,
+                        dynamicK, timeRanges, allowTimeAndGroup: true
+                    });
+                    return { placeholder, content: retrievedContent };
+                }
             })());
         }
 
@@ -903,11 +921,21 @@ class RAGDiaryPlugin {
 
                 if (finalSimilarity >= localThreshold) {
                     const modifiers = match[2] || '';
-                    const retrievedContent = await this._processRAGPlaceholder({
-                        dbName, modifiers, queryVector, userContent, combinedQueryForDisplay,
-                        dynamicK, timeRanges, allowTimeAndGroup: true
-                    });
-                    return { placeholder, content: retrievedContent };
+                    if (modifiers.includes('::AIMemo')) {
+                        // --- AIMemo Path ---
+                        console.log(`[RAGDiaryPlugin] Detected AIMemo modifier for hybrid: ${dbName}`);
+                        const retrievedContent = await this.aiMemoHandler.processAIMemo(
+                            dbName, userContent, aiContent, combinedQueryForDisplay
+                        );
+                        return { placeholder, content: retrievedContent };
+                    } else {
+                        // --- Standard RAG Path ---
+                        const retrievedContent = await this._processRAGPlaceholder({
+                            dbName, modifiers, queryVector, userContent, combinedQueryForDisplay,
+                            dynamicK, timeRanges, allowTimeAndGroup: true
+                        });
+                        return { placeholder, content: retrievedContent };
+                    }
                 }
                 return { placeholder, content: '' };
             })());
