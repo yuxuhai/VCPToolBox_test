@@ -58,8 +58,7 @@ class TimeExpressionParser {
                 console.log(`[TimeParser] Matched hardcoded expression: "${expr}"`);
                 let result = null;
                 if (config.days !== undefined) {
-                    const targetDate = new Date(now);
-                    targetDate.setUTCDate(now.getUTCDate() - config.days);
+                    const targetDate = now.subtract(config.days, 'day');
                     result = this._getDayBoundaries(targetDate);
                 } else if (config.type) {
                     result = this._getSpecialRange(now, config.type);
