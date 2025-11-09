@@ -872,50 +872,40 @@ class RAGDiaryPlugin {
             }
         }
 
-        // --- 并行处理所有 RAG、全文和混合模式的占位符 ---
+        // --- 收集所有 AIMemo 请求以便聚合处理 ---
+        const aiMemoRequests = [];
         const processingPromises = [];
 
-        // --- 1. 准备 [[...]] RAG 片段检索任务 ---
+        // --- 1. 收集 [[...]] 中的 AIMemo 请求 ---
         for (const match of ragDeclarations) {
             const placeholder = match[0];
             const dbName = match[1];
+            const modifiers = match[2] || '';
+            
             if (processedDiaries.has(dbName)) {
                 console.warn(`[RAGDiaryPlugin] Detected circular reference to "${dbName}" in [[...]]. Skipping.`);
-                processingPromises.push(Promise.resolve({ placeholder, content: `[检测到循环引用，已跳过“${dbName}日记本”的解析]` }));
+                processingPromises.push(Promise.resolve({ placeholder, content: `[检测到循环引用，已跳过"${dbName}日记本"的解析]` }));
                 continue;
             }
             processedDiaries.add(dbName);
 
-            processingPromises.push((async () => {
-                try {
-                    const modifiers = match[2] || '';
-                    if (modifiers.includes('::AIMemo')) {
-                        // --- AIMemo Path ---
-                        console.log(`[RAGDiaryPlugin] Detected AIMemo modifier for: ${dbName}`);
-                        
-                        // ✅ 添加空值检查
-                        if (!this.aiMemoHandler) {
-                            console.error(`[RAGDiaryPlugin] AIMemoHandler未初始化，无法处理 ${dbName}`);
-                            return { placeholder, content: '[AIMemo功能未初始化，请检查配置]' };
-                        }
-                        
-                        const retrievedContent = await this.aiMemoHandler.processAIMemo(
-                            dbName, userContent, aiContent, combinedQueryForDisplay
-                        );
-                        return { placeholder, content: retrievedContent };
-                    } else {
-                        // --- Standard RAG Path ---
+            if (modifiers.includes('::AIMemo')) {
+                aiMemoRequests.push({ placeholder, dbName });
+            } else {
+                // 标准 RAG 立即处理
+                processingPromises.push((async () => {
+                    try {
                         const retrievedContent = await this._processRAGPlaceholder({
                             dbName, modifiers, queryVector, userContent, combinedQueryForDisplay,
                             dynamicK, timeRanges, allowTimeAndGroup: true
                         });
                         return { placeholder, content: retrievedContent };
+                    } catch (error) {
+                        console.error(`[RAGDiaryPlugin] 处理占位符时出错 (${dbName}):`, error);
+                        return { placeholder, content: `[处理失败: ${error.message}]` };
                     }
-                } catch (error) {
-                    console.error(`[RAGDiaryPlugin] 处理占位符时出错 (${dbName}):`, error);
-                    return { placeholder, content: `[处理失败: ${error.message}]` };
-                }
-            })());
+                })());
+            }
         }
 
         // --- 2. 准备 <<...>> RAG 全文检索任务 ---
@@ -955,13 +945,15 @@ class RAGDiaryPlugin {
             })());
         }
 
-        // --- 3. 准备 《《...》》 混合模式任务 ---
+        // --- 3. 收集 《《...》》 混合模式中的 AIMemo 请求 ---
         for (const match of hybridDeclarations) {
             const placeholder = match[0];
             const dbName = match[1];
+            const modifiers = match[2] || '';
+            
             if (processedDiaries.has(dbName)) {
                 console.warn(`[RAGDiaryPlugin] Detected circular reference to "${dbName}" in 《《...》》. Skipping.`);
-                processingPromises.push(Promise.resolve({ placeholder, content: `[检测到循环引用，已跳过“${dbName}日记本”的解析]` }));
+                processingPromises.push(Promise.resolve({ placeholder, content: `[检测到循环引用，已跳过"${dbName}日记本"的解析]` }));
                 continue;
             }
             processedDiaries.add(dbName);
@@ -970,7 +962,7 @@ class RAGDiaryPlugin {
                 try {
                     const diaryConfig = this.ragConfig[dbName] || {};
                     const localThreshold = diaryConfig.threshold || GLOBAL_SIMILARITY_THRESHOLD;
-                    const dbNameVector = this.vectorDBManager.getDiaryNameVector(dbName); // <--- 使用缓存
+                    const dbNameVector = this.vectorDBManager.getDiaryNameVector(dbName);
                     if (!dbNameVector) {
                         console.warn(`[RAGDiaryPlugin] Could not find cached vector for diary name: "${dbName}". Skipping.`);
                         return { placeholder, content: '' };
@@ -982,23 +974,11 @@ class RAGDiaryPlugin {
                     const finalSimilarity = Math.max(baseSimilarity, enhancedSimilarity);
 
                     if (finalSimilarity >= localThreshold) {
-                        const modifiers = match[2] || '';
                         if (modifiers.includes('::AIMemo')) {
-                            // --- AIMemo Path ---
-                            console.log(`[RAGDiaryPlugin] Detected AIMemo modifier for hybrid: ${dbName}`);
-                            
-                            // ✅ 添加空值检查
-                            if (!this.aiMemoHandler) {
-                                console.error(`[RAGDiaryPlugin] AIMemoHandler未初始化，无法处理混合模式 ${dbName}`);
-                                return { placeholder, content: '[AIMemo功能未初始化，请检查配置]' };
-                            }
-                            
-                            const retrievedContent = await this.aiMemoHandler.processAIMemo(
-                                dbName, userContent, aiContent, combinedQueryForDisplay
-                            );
-                            return { placeholder, content: retrievedContent };
+                            // 收集到 AIMemo 请求列表
+                            aiMemoRequests.push({ placeholder, dbName });
+                            return { placeholder, content: '' }; // 暂时返回空，稍后统一处理
                         } else {
-                            // --- Standard RAG Path ---
                             const retrievedContent = await this._processRAGPlaceholder({
                                 dbName, modifiers, queryVector, userContent, combinedQueryForDisplay,
                                 dynamicK, timeRanges, allowTimeAndGroup: true
@@ -1012,6 +992,55 @@ class RAGDiaryPlugin {
                     return { placeholder, content: `[处理失败: ${error.message}]` };
                 }
             })());
+        }
+
+        // --- 4. 聚合处理所有 AIMemo 请求 ---
+        if (aiMemoRequests.length > 0) {
+            console.log(`[RAGDiaryPlugin] 检测到 ${aiMemoRequests.length} 个 AIMemo 请求，开始聚合处理...`);
+            
+            if (!this.aiMemoHandler) {
+                console.error(`[RAGDiaryPlugin] AIMemoHandler未初始化`);
+                aiMemoRequests.forEach(req => {
+                    processingPromises.push(Promise.resolve({
+                        placeholder: req.placeholder,
+                        content: '[AIMemo功能未初始化，请检查配置]'
+                    }));
+                });
+            } else {
+                try {
+                    // 聚合所有日记本名称
+                    const dbNames = aiMemoRequests.map(r => r.dbName);
+                    console.log(`[RAGDiaryPlugin] 聚合处理日记本: ${dbNames.join(', ')}`);
+                    
+                    // 调用聚合处理方法
+                    const aggregatedResult = await this.aiMemoHandler.processAIMemoAggregated(
+                        dbNames, userContent, aiContent, combinedQueryForDisplay
+                    );
+                    
+                    // 第一个返回完整结果，后续返回引用提示
+                    aiMemoRequests.forEach((req, index) => {
+                        if (index === 0) {
+                            processingPromises.push(Promise.resolve({
+                                placeholder: req.placeholder,
+                                content: aggregatedResult
+                            }));
+                        } else {
+                            processingPromises.push(Promise.resolve({
+                                placeholder: req.placeholder,
+                                content: `[AIMemo语义推理检索模式] 检索结果已在"${dbNames[0]}"日记本中合并展示，本次为跨库联合检索。`
+                            }));
+                        }
+                    });
+                } catch (error) {
+                    console.error(`[RAGDiaryPlugin] AIMemo聚合处理失败:`, error);
+                    aiMemoRequests.forEach(req => {
+                        processingPromises.push(Promise.resolve({
+                            placeholder: req.placeholder,
+                            content: `[AIMemo处理失败: ${error.message}]`
+                        }));
+                    });
+                }
+            }
         }
 
         // --- 执行所有任务并替换内容 ---

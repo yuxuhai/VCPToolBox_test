@@ -49,58 +49,73 @@ class AIMemoHandler {
     }
 
     /**
-     * 处理 ::AIMemo 占位符
-     * @param {string} dbName - 日记本名称
-     * @param {string} userContent - 用户输入（已清理HTML）
-     * @param {string} aiContent - AI回复（已清理HTML，可能为null）
+     * 聚合处理多个日记本的 AIMemo 请求（新增）
+     * @param {Array<string>} dbNames - 日记本名称数组
+     * @param {string} userContent - 用户输入
+     * @param {string} aiContent - AI回复
      * @param {string} combinedQueryForDisplay - 用于VCP广播的组合查询
-     * @returns {string} - 格式化的AI召回结果
+     * @returns {string} - 格式化的聚合AI召回结果
      */
-    async processAIMemo(dbName, userContent, aiContent, combinedQueryForDisplay) {
+    async processAIMemoAggregated(dbNames, userContent, aiContent, combinedQueryForDisplay) {
         if (!this.isConfigured()) {
             console.warn('[AIMemoHandler] AIMemo is not configured. Skipping.');
             return '[AIMemo功能未配置]';
         }
 
-        console.log(`[AIMemoHandler] Processing AIMemo for diary: ${dbName}`);
+        console.log(`[AIMemoHandler] 聚合处理 ${dbNames.length} 个日记本: ${dbNames.join(', ')}`);
 
         try {
-            // 1. 获取完整日记内容
-            const diaryContent = await this.ragPlugin.getDiaryContent(dbName);
+            // 1. 聚合所有日记本内容
+            let aggregatedContent = '';
+            const loadedDiaries = [];
             
-            if (!diaryContent || diaryContent.includes('[无法读取') || diaryContent.includes('[内容为空]')) {
-                console.warn(`[AIMemoHandler] Diary "${dbName}" is empty or inaccessible.`);
-                return '[该日记本为空或无法访问]';
+            for (const dbName of dbNames) {
+                const diaryContent = await this.ragPlugin.getDiaryContent(dbName);
+                if (!diaryContent || diaryContent.includes('[无法读取') || diaryContent.includes('[内容为空]')) {
+                    console.warn(`[AIMemoHandler] 跳过空日记本: ${dbName}`);
+                    continue;
+                }
+                aggregatedContent += `\n\n=== ${dbName}日记本 ===\n${diaryContent}`;
+                loadedDiaries.push(dbName);
             }
 
-            // 2. 估算token并决定是否需要分批
-            const knowledgeBaseTokens = this._estimateTokens(diaryContent);
+            if (!aggregatedContent) {
+                return '[所有日记本均为空或无法访问]';
+            }
+
+            console.log(`[AIMemoHandler] 成功加载 ${loadedDiaries.length} 个日记本，总大小: ${aggregatedContent.length} 字符`);
+
+            // 2. 估算token并决定处理方式
+            const knowledgeBaseTokens = this._estimateTokens(aggregatedContent);
             const contextTokens = this._estimateTokens(userContent) + this._estimateTokens(aiContent || '');
             const promptTokens = this._estimateTokens(this.promptTemplate);
             const totalTokens = knowledgeBaseTokens + contextTokens + promptTokens;
 
-            console.log(`[AIMemoHandler] Token estimation - KB: ${knowledgeBaseTokens}, Context: ${contextTokens}, Prompt: ${promptTokens}, Total: ${totalTokens}`);
+            console.log(`[AIMemoHandler] 聚合Token估算 - KB: ${knowledgeBaseTokens}, Context: ${contextTokens}, Total: ${totalTokens}`);
 
-            // 3. 如果超过限制，需要分批处理
+            // 3. 处理（单次或分批）
+            let result;
             if (totalTokens > this.config.maxTokensPerBatch) {
-                return await this._processBatched(dbName, diaryContent, userContent, aiContent, combinedQueryForDisplay);
+                result = await this._processBatchedAggregated(loadedDiaries, aggregatedContent, userContent, aiContent, combinedQueryForDisplay);
             } else {
-                return await this._processSingle(dbName, diaryContent, userContent, aiContent, combinedQueryForDisplay);
+                result = await this._processSingleAggregated(loadedDiaries, aggregatedContent, userContent, aiContent, combinedQueryForDisplay);
             }
 
+            return result;
+
         } catch (error) {
-            console.error(`[AIMemoHandler] Error processing AIMemo for "${dbName}":`, error);
-            return `[AIMemo处理失败: ${error.message}]`;
+            console.error(`[AIMemoHandler] 聚合处理失败:`, error);
+            return `[AIMemo聚合处理失败: ${error.message}]`;
         }
     }
 
     /**
-     * 单次处理（知识库较小）
+     * 单次聚合处理
      */
-    async _processSingle(dbName, diaryContent, userContent, aiContent, combinedQueryForDisplay) {
-        console.log(`[AIMemoHandler] Processing in single mode for "${dbName}"`);
+    async _processSingleAggregated(dbNames, aggregatedContent, userContent, aiContent, combinedQueryForDisplay) {
+        console.log(`[AIMemoHandler] 单次聚合处理 ${dbNames.length} 个日记本`);
         
-        const prompt = this._buildPrompt(diaryContent, userContent, aiContent);
+        const prompt = this._buildPrompt(aggregatedContent, userContent, aiContent);
         const aiResponse = await this._callAIModel(prompt);
         
         if (!aiResponse) {
@@ -114,35 +129,34 @@ class AIMemoHandler {
             try {
                 this.ragPlugin.pushVcpInfo({
                     type: 'AI_MEMO_RETRIEVAL',
-                    dbName: dbName,
+                    dbNames: dbNames,
                     query: combinedQueryForDisplay,
-                    mode: 'single',
-                    rawResponse: aiResponse.substring(0, 500), // 截断以避免过大
-                    extractedMemories: extractedMemories.substring(0, 1000)
+                    mode: 'aggregated_single',
+                    diaryCount: dbNames.length,
+                    rawResponse: aiResponse,
+                    extractedMemories: extractedMemories
                 });
             } catch (broadcastError) {
                 console.error('[AIMemoHandler] VCP Info broadcast failed:', broadcastError);
             }
         }
 
-        return extractedMemories;
+        return `[跨库联合检索: ${dbNames.join(' + ')}]\n${extractedMemories}`;
     }
 
     /**
-     * 分批处理（知识库较大）
+     * 分批聚合处理
      */
-    async _processBatched(dbName, diaryContent, userContent, aiContent, combinedQueryForDisplay) {
-        console.log(`[AIMemoHandler] Processing in batched mode for "${dbName}"`);
+    async _processBatchedAggregated(dbNames, aggregatedContent, userContent, aiContent, combinedQueryForDisplay) {
+        console.log(`[AIMemoHandler] 分批聚合处理 ${dbNames.length} 个日记本`);
         
-        // 1. 将知识库分割成多个批次
-        const batches = this._splitIntoBatches(diaryContent);
-        console.log(`[AIMemoHandler] Split knowledge base into ${batches.length} batches`);
+        const batches = this._splitIntoBatches(aggregatedContent);
+        console.log(`[AIMemoHandler] 聚合内容分割为 ${batches.length} 个批次`);
 
-        // 2. 并发处理每个批次（限制并发数）
         const batchResults = [];
         for (let i = 0; i < batches.length; i += this.config.batchSize) {
             const batchGroup = batches.slice(i, i + this.config.batchSize);
-            const promises = batchGroup.map((batch, idx) => 
+            const promises = batchGroup.map((batch, idx) =>
                 this._processBatch(batch, userContent, aiContent, i + idx + 1, batches.length)
             );
             
@@ -150,7 +164,6 @@ class AIMemoHandler {
             batchResults.push(...groupResults);
         }
 
-        // 3. 合并所有批次的结果
         const mergedMemories = this._mergeBatchResults(batchResults);
 
         // VCP Info 广播
@@ -158,19 +171,34 @@ class AIMemoHandler {
             try {
                 this.ragPlugin.pushVcpInfo({
                     type: 'AI_MEMO_RETRIEVAL',
-                    dbName: dbName,
+                    dbNames: dbNames,
                     query: combinedQueryForDisplay,
-                    mode: 'batched',
+                    mode: 'aggregated_batched',
+                    diaryCount: dbNames.length,
                     batchCount: batches.length,
-                    extractedMemories: mergedMemories.substring(0, 1000)
+                    extractedMemories: mergedMemories
                 });
             } catch (broadcastError) {
                 console.error('[AIMemoHandler] VCP Info broadcast failed:', broadcastError);
             }
         }
 
-        return mergedMemories;
+        return `[跨库联合检索: ${dbNames.join(' + ')}]\n${mergedMemories}`;
     }
+
+    /**
+     * 处理 ::AIMemo 占位符（保留用于向后兼容）
+     * @param {string} dbName - 日记本名称
+     * @param {string} userContent - 用户输入（已清理HTML）
+     * @param {string} aiContent - AI回复（已清理HTML，可能为null）
+     * @param {string} combinedQueryForDisplay - 用于VCP广播的组合查询
+     * @returns {string} - 格式化的AI召回结果
+     */
+    async processAIMemo(dbName, userContent, aiContent, combinedQueryForDisplay) {
+        // 直接调用聚合方法，传入单个日记本
+        return await this.processAIMemoAggregated([dbName], userContent, aiContent, combinedQueryForDisplay);
+    }
+
 
     /**
      * 处理单个批次
