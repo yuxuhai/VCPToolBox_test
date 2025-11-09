@@ -65,40 +65,39 @@ class AIMemoHandler {
         console.log(`[AIMemoHandler] 聚合处理 ${dbNames.length} 个日记本: ${dbNames.join(', ')}`);
 
         try {
-            // 1. 聚合所有日记本内容
-            let aggregatedContent = '';
+            // 1. 收集所有日记文件（基于文件级别，而非合并后的字符串）
+            const allDiaryFiles = [];
             const loadedDiaries = [];
             
             for (const dbName of dbNames) {
-                const diaryContent = await this.ragPlugin.getDiaryContent(dbName);
-                if (!diaryContent || diaryContent.includes('[无法读取') || diaryContent.includes('[内容为空]')) {
+                const files = await this._getDiaryFiles(dbName);
+                if (files.length === 0) {
                     console.warn(`[AIMemoHandler] 跳过空日记本: ${dbName}`);
                     continue;
                 }
-                aggregatedContent += `\n\n=== ${dbName}日记本 ===\n${diaryContent}`;
+                allDiaryFiles.push(...files.map(f => ({ ...f, dbName })));
                 loadedDiaries.push(dbName);
             }
 
-            if (!aggregatedContent) {
+            if (allDiaryFiles.length === 0) {
                 return '[所有日记本均为空或无法访问]';
             }
 
-            console.log(`[AIMemoHandler] 成功加载 ${loadedDiaries.length} 个日记本，总大小: ${aggregatedContent.length} 字符`);
+            console.log(`[AIMemoHandler] 成功加载 ${loadedDiaries.length} 个日记本，共 ${allDiaryFiles.length} 个文件`);
 
-            // 2. 估算token并决定处理方式
-            const knowledgeBaseTokens = this._estimateTokens(aggregatedContent);
-            const contextTokens = this._estimateTokens(userContent) + this._estimateTokens(aiContent || '');
-            const promptTokens = this._estimateTokens(this.promptTemplate);
-            const totalTokens = knowledgeBaseTokens + contextTokens + promptTokens;
+            // 2. 估算总token并决定处理方式
+            const totalFileTokens = allDiaryFiles.reduce((sum, f) => sum + f.tokens, 0);
+            const FIXED_OVERHEAD = 10000; // 固定预留10k给提示词和上下文
+            const totalTokens = totalFileTokens + FIXED_OVERHEAD;
 
-            console.log(`[AIMemoHandler] 聚合Token估算 - KB: ${knowledgeBaseTokens}, Context: ${contextTokens}, Total: ${totalTokens}`);
+            console.log(`[AIMemoHandler] Token估算 - 文件总计: ${totalFileTokens}, 固定开销: ${FIXED_OVERHEAD}, 总计: ${totalTokens}`);
 
             // 3. 处理（单次或分批）
             let result;
             if (totalTokens > this.config.maxTokensPerBatch) {
-                result = await this._processBatchedAggregated(loadedDiaries, aggregatedContent, userContent, aiContent, combinedQueryForDisplay);
+                result = await this._processBatchedAggregated(loadedDiaries, allDiaryFiles, userContent, aiContent, combinedQueryForDisplay);
             } else {
-                result = await this._processSingleAggregated(loadedDiaries, aggregatedContent, userContent, aiContent, combinedQueryForDisplay);
+                result = await this._processSingleAggregated(loadedDiaries, allDiaryFiles, userContent, aiContent, combinedQueryForDisplay);
             }
 
             return result;
@@ -112,10 +111,12 @@ class AIMemoHandler {
     /**
      * 单次聚合处理
      */
-    async _processSingleAggregated(dbNames, aggregatedContent, userContent, aiContent, combinedQueryForDisplay) {
-        console.log(`[AIMemoHandler] 单次聚合处理 ${dbNames.length} 个日记本`);
+    async _processSingleAggregated(dbNames, diaryFiles, userContent, aiContent, combinedQueryForDisplay) {
+        console.log(`[AIMemoHandler] 单次聚合处理 ${dbNames.length} 个日记本，共 ${diaryFiles.length} 个文件`);
         
-        const prompt = this._buildPrompt(aggregatedContent, userContent, aiContent);
+        // 将所有文件内容合并
+        const knowledgeBase = this._combineFiles(diaryFiles);
+        const prompt = this._buildPrompt(knowledgeBase, userContent, aiContent);
         const aiResponse = await this._callAIModel(prompt);
         
         if (!aiResponse) {
@@ -133,6 +134,7 @@ class AIMemoHandler {
                     query: combinedQueryForDisplay,
                     mode: 'aggregated_single',
                     diaryCount: dbNames.length,
+                    fileCount: diaryFiles.length,
                     rawResponse: aiResponse,
                     extractedMemories: extractedMemories
                 });
@@ -147,11 +149,17 @@ class AIMemoHandler {
     /**
      * 分批聚合处理
      */
-    async _processBatchedAggregated(dbNames, aggregatedContent, userContent, aiContent, combinedQueryForDisplay) {
-        console.log(`[AIMemoHandler] 分批聚合处理 ${dbNames.length} 个日记本`);
+    async _processBatchedAggregated(dbNames, diaryFiles, userContent, aiContent, combinedQueryForDisplay) {
+        console.log(`[AIMemoHandler] 分批聚合处理 ${dbNames.length} 个日记本，共 ${diaryFiles.length} 个文件`);
         
-        const batches = this._splitIntoBatches(aggregatedContent);
-        console.log(`[AIMemoHandler] 聚合内容分割为 ${batches.length} 个批次`);
+        const batches = this._splitFilesIntoBatches(diaryFiles);
+        console.log(`[AIMemoHandler] 文件分割为 ${batches.length} 个批次`);
+        
+        // 打印每个批次的统计信息
+        batches.forEach((batch, idx) => {
+            const batchTokens = batch.reduce((sum, f) => sum + f.tokens, 0);
+            console.log(`[AIMemoHandler] 批次 ${idx + 1}: ${batch.length} 个文件, ${batchTokens} tokens`);
+        });
 
         const batchResults = [];
         for (let i = 0; i < batches.length; i += this.config.batchSize) {
@@ -175,6 +183,7 @@ class AIMemoHandler {
                     query: combinedQueryForDisplay,
                     mode: 'aggregated_batched',
                     diaryCount: dbNames.length,
+                    fileCount: diaryFiles.length,
                     batchCount: batches.length,
                     extractedMemories: mergedMemories
                 });
@@ -201,12 +210,13 @@ class AIMemoHandler {
 
 
     /**
-     * 处理单个批次
+     * 处理单个批次（基于文件数组）
      */
-    async _processBatch(batchContent, userContent, aiContent, batchIndex, totalBatches) {
-        console.log(`[AIMemoHandler] Processing batch ${batchIndex}/${totalBatches}`);
+    async _processBatch(batchFiles, userContent, aiContent, batchIndex, totalBatches) {
+        console.log(`[AIMemoHandler] Processing batch ${batchIndex}/${totalBatches} (${batchFiles.length} files)`);
         
-        const prompt = this._buildPrompt(batchContent, userContent, aiContent);
+        const knowledgeBase = this._combineFiles(batchFiles);
+        const prompt = this._buildPrompt(knowledgeBase, userContent, aiContent);
         const aiResponse = await this._callAIModel(prompt);
         
         if (!aiResponse) {
@@ -218,39 +228,87 @@ class AIMemoHandler {
     }
 
     /**
-     * 将知识库分割成多个批次
+     * 获取日记本的所有文件（基于文件级别）
      */
-    _splitIntoBatches(content) {
-        const maxTokensPerBatch = this.config.maxTokensPerBatch * 0.6; // 留60%给知识库，40%给提示词和上下文
+    async _getDiaryFiles(dbName) {
+        const projectBasePath = process.env.PROJECT_BASE_PATH;
+        const dailyNoteRootPath = projectBasePath
+            ? path.join(projectBasePath, 'dailynote')
+            : path.join(__dirname, '..', '..', 'dailynote');
+        
+        const characterDirPath = path.join(dailyNoteRootPath, dbName);
+        const files = [];
+        
+        try {
+            const fileList = await fs.readdir(characterDirPath);
+            const relevantFiles = fileList.filter(file => {
+                const lowerCaseFile = file.toLowerCase();
+                return lowerCaseFile.endsWith('.txt') || lowerCaseFile.endsWith('.md');
+            }).sort();
+
+            for (const file of relevantFiles) {
+                const filePath = path.join(characterDirPath, file);
+                try {
+                    const content = await fs.readFile(filePath, 'utf-8');
+                    const tokens = this._estimateTokens(content);
+                    files.push({
+                        name: file,
+                        content: content,
+                        tokens: tokens
+                    });
+                } catch (readErr) {
+                    console.warn(`[AIMemoHandler] 无法读取文件 ${file}:`, readErr.message);
+                }
+            }
+        } catch (dirError) {
+            if (dirError.code !== 'ENOENT') {
+                console.error(`[AIMemoHandler] 读取目录失败 ${characterDirPath}:`, dirError.message);
+            }
+        }
+        
+        return files;
+    }
+
+    /**
+     * 将文件数组分割成多个批次（基于文件级别的贪心打包）
+     */
+    _splitFilesIntoBatches(files) {
+        const FIXED_OVERHEAD = 10000; // 固定预留10k给提示词和上下文
+        const maxTokensPerBatch = this.config.maxTokensPerBatch - FIXED_OVERHEAD;
         const batches = [];
         
-        // 按日记条目分割（假设每个条目以日期开头）
-        const entries = content.split(/\n(?=\[\d{4}-\d{2}-\d{2}\])/);
-        
-        let currentBatch = '';
+        let currentBatch = [];
         let currentTokens = 0;
 
-        for (const entry of entries) {
-            const entryTokens = this._estimateTokens(entry);
-            
-            if (currentTokens + entryTokens > maxTokensPerBatch && currentBatch) {
-                // 当前批次已满，保存并开始新批次
-                batches.push(currentBatch);
-                currentBatch = entry;
-                currentTokens = entryTokens;
+        for (const file of files) {
+            // 如果当前批次为空，或者加入这个文件不会超限，就加入
+            if (currentBatch.length === 0 || currentTokens + file.tokens <= maxTokensPerBatch) {
+                currentBatch.push(file);
+                currentTokens += file.tokens;
             } else {
-                // 添加到当前批次
-                currentBatch += (currentBatch ? '\n' : '') + entry;
-                currentTokens += entryTokens;
+                // 当前批次已满，保存并开启新批次
+                batches.push(currentBatch);
+                currentBatch = [file];
+                currentTokens = file.tokens;
             }
         }
 
         // 添加最后一个批次
-        if (currentBatch) {
+        if (currentBatch.length > 0) {
             batches.push(currentBatch);
         }
 
-        return batches.length > 0 ? batches : [content]; // 至少返回一个批次
+        return batches.length > 0 ? batches : [files]; // 至少返回一个批次
+    }
+
+    /**
+     * 将文件数组合并成单个知识库字符串
+     */
+    _combineFiles(files) {
+        return files.map(f => {
+            const dbPrefix = f.dbName ? `=== ${f.dbName}日记本 ===\n` : '';
+            return dbPrefix + f.content;
+        }).join('\n\n---\n\n');
     }
 
     /**
