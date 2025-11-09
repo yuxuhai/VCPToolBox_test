@@ -414,8 +414,13 @@ class AIMemoHandler {
                     return null;
                 }
 
-                console.log(`[AIMemoHandler] AI model responded successfully (${content.length} chars)`);
-                return content;
+                const cleanedContent = this._handleRepetitiveOutput(content);
+                if (cleanedContent.length < content.length) {
+                    console.log(`[AIMemoHandler] AI model response was cleaned from repetition. Original length: ${content.length}, Cleaned length: ${cleanedContent.length}`);
+                }
+
+                console.log(`[AIMemoHandler] AI model responded successfully (${cleanedContent.length} chars)`);
+                return cleanedContent;
 
             } catch (error) {
                 const status = error.response?.status;
@@ -478,6 +483,64 @@ class AIMemoHandler {
         const otherChars = text.length - chineseChars;
         // 中文: ~1.5 token/char, 英文: ~0.25 token/char (1 word ≈ 4 chars)
         return Math.ceil(chineseChars * 1.5 + otherChars * 0.25);
+    }
+
+    /**
+     * 处理AI模型输出中的循环重复内容
+     * @param {string} text - AI模型的原始输出
+     * @returns {string} - 清理重复内容后的文本
+     */
+    _handleRepetitiveOutput(text) {
+        // 1. 将文本按换行符分割成行，过滤掉空行
+        const lines = text.split('\n').filter(line => line.trim().length > 0);
+        if (lines.length < 10) { // 如果行数太少，不太可能出现有意义的重复
+            return text;
+        }
+
+        // 2. 寻找重复的文本块。我们假设重复单元至少包含2行
+        const minRepeatUnitSize = 2;
+        let repetitionFound = false;
+        let firstOccurrenceEndIndex = -1;
+        let repeatUnitSize = 0;
+
+        // 从可能的重复单元大小开始迭代
+        for (let unitSize = minRepeatUnitSize; unitSize <= Math.floor(lines.length / 2); unitSize++) {
+            // 检查从末尾开始的两个连续单元是否相同
+            const lastUnit = lines.slice(lines.length - unitSize).join('\n');
+            const secondLastUnit = lines.slice(lines.length - 2 * unitSize, lines.length - unitSize).join('\n');
+
+            if (lastUnit === secondLastUnit) {
+                // 发现了重复，现在从头开始找到这个重复单元第一次出现的位置
+                const unitToFind = lastUnit;
+                for (let i = 0; i <= lines.length - 2 * unitSize; i++) {
+                    const currentSlice = lines.slice(i, i + unitSize).join('\n');
+                    if (currentSlice === unitToFind) {
+                        // 确认这确实是一个重复序列的开始
+                        const nextSlice = lines.slice(i + unitSize, i + 2 * unitSize).join('\n');
+                        if (nextSlice === unitToFind) {
+                            repetitionFound = true;
+                            firstOccurrenceEndIndex = i + unitSize;
+                            repeatUnitSize = unitSize;
+                            break; // 找到第一次出现就跳出内层循环
+                        }
+                    }
+                }
+            }
+            if (repetitionFound) {
+                break; // 找到任何一个重复模式就跳出外层循环
+            }
+        }
+
+        // 3. 如果找到了重复，截断文本
+        if (repetitionFound) {
+            console.log(`[AIMemoHandler] Repetition detected. Unit size: ${repeatUnitSize}. Truncating content.`);
+            // 保留到第一个重复单元结束的部分
+            const cleanedLines = lines.slice(0, firstOccurrenceEndIndex);
+            return cleanedLines.join('\n');
+        }
+
+        // 4. 如果没有找到重复，返回原始文本
+        return text;
     }
 }
 
