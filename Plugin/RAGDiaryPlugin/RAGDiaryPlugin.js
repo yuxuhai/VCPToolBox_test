@@ -636,7 +636,7 @@ class RAGDiaryPlugin {
         try {
             // V3.0: 支持多system消息处理
             // 1. 识别所有需要处理的 system 消息（包括日记本、元思考和全局AIMemo开关）
-            let isAIMemoLicensed = false; // <--- AIMemo许可证
+            let isAIMemoLicensed = false; // <--- AIMemo许可证 [[AIMemo=True]] 检测标志
             const targetSystemMessageIndices = messages.reduce((acc, m, index) => {
                 if (m.role === 'system' && typeof m.content === 'string') {
                     // 检查全局 AIMemo 开关
