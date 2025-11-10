@@ -19,7 +19,11 @@ async function getRealAuthCode(debugMode = false) {
 }
 
 // A helper function to handle fetch with retries for specific status codes
-async function fetchWithRetry(url, options, retries = 3, delay = 1000, debugMode = false) {
+async function fetchWithRetry(
+  url,
+  options,
+  { retries = 3, delay = 1000, debugMode = false, onRetry = null } = {},
+) {
   const { default: fetch } = await import('node-fetch');
   for (let i = 0; i < retries; i++) {
     try {
@@ -29,6 +33,9 @@ async function fetchWithRetry(url, options, retries = 3, delay = 1000, debugMode
           console.warn(
             `[Fetch Retry] Received status ${response.status}. Retrying in ${delay}ms... (${i + 1}/${retries})`,
           );
+        }
+        if (onRetry) {
+          await onRetry(i + 1, { status: response.status, message: response.statusText });
         }
         await new Promise(resolve => setTimeout(resolve, delay * (i + 1))); // Increase delay for subsequent retries
         continue; // Try again
@@ -48,6 +55,9 @@ async function fetchWithRetry(url, options, retries = 3, delay = 1000, debugMode
         console.warn(
           `[Fetch Retry] Fetch failed with error: ${error.message}. Retrying in ${delay}ms... (${i + 1}/${retries})`,
         );
+      }
+      if (onRetry) {
+        await onRetry(i + 1, { status: 'NETWORK_ERROR', message: error.message });
       }
       await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
     }
@@ -236,9 +246,21 @@ class ChatCompletionHandler {
           body: JSON.stringify({ ...originalBody, stream: willStreamResponse }),
           signal: abortController.signal,
         },
-        apiRetries,
-        apiRetryDelay,
-        DEBUG_MODE,
+        {
+          retries: apiRetries,
+          delay: apiRetryDelay,
+          debugMode: DEBUG_MODE,
+          onRetry: async (attempt, errorInfo) => {
+            if (!res.headersSent && isOriginalRequestStreaming) {
+              if (DEBUG_MODE)
+                console.log(`[VCP Retry] First retry attempt (#${attempt}). Sending 200 OK to client to establish stream.`);
+              res.status(200);
+              res.setHeader('Content-Type', 'text/event-stream');
+              res.setHeader('Cache-Control', 'no-cache');
+              res.setHeader('Connection', 'keep-alive');
+            }
+          },
+        },
       );
 
       const isUpstreamStreaming =
