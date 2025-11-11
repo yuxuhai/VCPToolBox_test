@@ -51,7 +51,11 @@ function launchDelegate(directoryPath, analysisId, fullAnalyze = false) {
 
 // 处理 "AnalyzeProject" 命令
 async function handleAnalyzeProject(args) {
-    const { directoryPath, fullAnalyze = false } = args; // 默认为 false
+    const { directoryPath } = args;
+    // 支持 fullAnalyze 和 full 两种参数键（鲁棒性优化）
+    const fullAnalyze = args.fullAnalyze === true || args.fullAnalyze === 'true' ||
+                        args.full === true || args.full === 'true';
+    
     if (!directoryPath || typeof directoryPath !== 'string') {
         return { status: 'error', error: 'Missing or invalid "directoryPath" parameter.' };
     }
