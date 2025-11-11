@@ -2,13 +2,27 @@ const fs = require('fs').promises;
 const fsSync = require('fs'); // 用于同步操作
 const path = require('path');
 const { spawn } = require('child_process');
+const dotenv = require('dotenv');
 
 const DB_DIR = path.join(__dirname, 'database');
+const FILE_CACHE_DIR = path.join(__dirname, 'file_cache');
+
+// 加载配置
+const configPath = path.join(__dirname, 'config.env');
+let config = {};
+try {
+    const envContent = fsSync.readFileSync(configPath, 'utf-8');
+    config = dotenv.parse(envContent);
+} catch (error) {
+    // 配置文件不存在时使用环境变量
+    config = {};
+}
 
 // 确保数据库目录存在
 async function ensureDbDirectory() {
     try {
         await fs.mkdir(DB_DIR, { recursive: true });
+        await fs.mkdir(FILE_CACHE_DIR, { recursive: true });
     } catch (error) {
         console.error('Error creating database directory:', error);
         throw error; // 抛出错误，终止执行
@@ -49,6 +63,163 @@ function launchDelegate(directoryPath, analysisId, fullAnalyze = false) {
     delegateProcess.unref();
 }
 
+// 需要跳过的目录
+const SKIP_DIRS = ['node_modules', '.git', '.env', 'env', '__pycache__', 'dist', 'build', '.next', '.nuxt'];
+const LIST_ONLY_DIRS = ['vendor'];
+
+// 递归获取文件树（快速版本，不收集待分析文件）
+async function getQuickFileTree(dir, prefix = '', isRoot = true) {
+    let tree = '';
+    
+    try {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        
+        for (let i = 0; i < entries.length; i++) {
+            const entry = entries[i];
+            const isLast = i === entries.length - 1;
+            const connector = isLast ? '└── ' : '├── ';
+            const childPrefix = prefix + (isLast ? '    ' : '│   ');
+            
+            if (entry.isDirectory()) {
+                if (SKIP_DIRS.includes(entry.name)) {
+                    tree += `${prefix}${connector}${entry.name}/ [跳过]\n`;
+                    continue;
+                }
+                
+                if (LIST_ONLY_DIRS.includes(entry.name)) {
+                    tree += `${prefix}${connector}${entry.name}/ [仅列出]\n`;
+                    continue;
+                }
+                
+                tree += `${prefix}${connector}${entry.name}/\n`;
+                const subPath = path.join(dir, entry.name);
+                tree += await getQuickFileTree(subPath, childPrefix, false);
+                
+            } else {
+                tree += `${prefix}${connector}${entry.name}\n`;
+            }
+        }
+    } catch (error) {
+        tree += `${prefix}[错误: ${error.message}]\n`;
+    }
+    
+    return tree;
+}
+
+// 查找README文件
+async function findReadmeFile(dir) {
+    try {
+        const entries = await fs.readdir(dir);
+        const readmeVariants = ['README.md', 'readme.md', 'Readme.md', 'README.MD', 'readme.MD'];
+        for (const variant of readmeVariants) {
+            if (entries.includes(variant)) {
+                return path.join(dir, variant);
+            }
+        }
+        return null;
+    } catch (error) {
+        return null;
+    }
+}
+
+// 调用AI模型（用于快速分析的项目总结）
+async function callAI(systemPrompt, userPrompt, retries = 3) {
+    const modelUrl = config.ProjectAnalystModelUrl || process.env.ProjectAnalystModelUrl;
+    const modelKey = config.ProjectAnalystModelKey || process.env.ProjectAnalystModelKey;
+    const modelName = config.ProjectAnalystModel || 'gemini-2.5-flash-lite-preview-09-2025-thinking';
+    const maxOutputTokens = parseInt(config.ProjectAnalystMaxOutputToken || '50000');
+    
+    if (!modelUrl || !modelKey) {
+        throw new Error('AI模型配置不完整，请检查 config.env 中的 ProjectAnalystModelUrl 和 ProjectAnalystModelKey');
+    }
+    
+    const requestBody = {
+        model: modelName,
+        messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+        ],
+        max_tokens: maxOutputTokens
+    };
+    
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const response = await fetch(modelUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${modelKey}`
+                },
+                body: JSON.stringify(requestBody)
+            });
+            
+            if (response.status === 429) {
+                const waitTime = 60000; // 1分钟
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                continue;
+            }
+            
+            if (response.status === 500 || response.status === 503) {
+                if (attempt < retries) {
+                    await new Promise(resolve => setTimeout(resolve, 3000 * attempt));
+                    continue;
+                }
+            }
+            
+            if (!response.ok) {
+                throw new Error(`AI API返回错误: ${response.status} ${response.statusText}`);
+            }
+            
+            const data = await response.json();
+            return data.choices[0].message.content;
+            
+        } catch (error) {
+            if (attempt < retries) {
+                await new Promise(resolve => setTimeout(resolve, 3000 * attempt));
+            } else {
+                throw error;
+            }
+        }
+    }
+}
+
+// 获取项目总结
+async function getProjectSummary(fileTree, readmeContent) {
+    const systemPrompt = `你是一位高级软件架构师。你的任务是深入分析项目结构和文档，精准地识别出项目的核心功能和关键实现。你的回答应该简洁、专业，并直指要点。`;
+    
+    const userPrompt = `请根据以下提供的项目文件结构树和README内容，完成以下任务：
+
+1.  **核心功能总结**: 用一句话总结该项目的主要目标或核心功能。
+2.  **关键实现定位**: 识别并列出 2-3 个实现上述核心功能的最关键的文件或类。
+3.  **简要原因**: 对每个列出的文件/类，用一句话解释它为什么是核心。
+
+**项目文件结构树:**
+\`\`\`
+${fileTree}
+\`\`\`
+
+**README内容:**
+\`\`\`
+${readmeContent}
+\`\`\`
+
+请按照以下格式输出，不要添加任何额外的解释或客套话：
+
+**核心功能:** [此处填写项目核心功能总结]
+
+**关键实现:**
+*   \`[文件/类名1]\`: [选择该文件/类的原因]
+*   \`[文件/类名2]\`: [选择该文件/类的原因]
+*   \`[文件/类名3]\`: [选择该文件/类的原因]
+`;
+    
+    try {
+        return await callAI(systemPrompt, userPrompt);
+    } catch (error) {
+        return `[无法生成项目总结: ${error.message}]`;
+    }
+}
+
 // 处理 "AnalyzeProject" 命令
 async function handleAnalyzeProject(args) {
     const { directoryPath } = args;
@@ -70,20 +241,78 @@ async function handleAnalyzeProject(args) {
     }
 
     const projectName = path.basename(directoryPath);
-    const timestamp = getReadableTimestamp();
-    const analysisId = `${projectName}-${timestamp}`;
     
-    // 启动后台分析进程，并传递分析模式
-    launchDelegate(directoryPath, analysisId, fullAnalyze);
+    // 如果是完整分析，启动异步后台任务
+    if (fullAnalyze) {
+        const timestamp = getReadableTimestamp();
+        const analysisId = `${projectName}-${timestamp}`;
+        
+        // 启动后台分析进程
+        launchDelegate(directoryPath, analysisId, true);
 
-    const message = fullAnalyze
-        ? `项目 **完整** 分析任务已启动。`
-        : `项目 **快速** 分析任务已启动。`;
+        return {
+            status: 'success',
+            result: `项目 **完整** 分析任务已启动。\n分析ID: ${analysisId}\n你可以稍后使用 QueryAnalysis 命令查询分析报告。`
+        };
+    }
+    
+    // 如果是快速分析，同步执行并立即返回结果
+    try {
+        // 1. 获取文件树
+        const fileTree = await getQuickFileTree(directoryPath);
+        
+        // 2. 查找并读取 README
+        const readmePath = await findReadmeFile(directoryPath);
+        let readmeContent = '';
+        if (readmePath) {
+            try {
+                readmeContent = await fs.readFile(readmePath, 'utf-8');
+            } catch (error) {
+                readmeContent = '读取 README 文件失败。';
+            }
+        } else {
+            readmeContent = '未找到 README.md 文件。';
+        }
+        
+        // 3. 调用 AI 生成项目总结
+        const summary = await getProjectSummary(fileTree, readmeContent);
+        
+        // 4. 生成快速报告
+        const quickReport = `# 项目快速分析: ${projectName}
 
-    return {
-        status: 'success',
-        result: `${message}\n分析ID: ${analysisId}\n你可以稍后使用 QueryAnalysis 命令查询分析报告。`
-    };
+**项目路径:** ${directoryPath}
+**分析时间:** ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}
+
+---
+
+## 📋 项目简介
+
+${summary}
+
+---
+
+## 📁 文件结构树
+
+\`\`\`
+${fileTree}
+\`\`\`
+
+---
+
+*这是快速分析结果。如需逐文件深入分析，请使用 \`full: true\` 参数启动完整分析任务。*
+`;
+        
+        return {
+            status: 'success',
+            result: quickReport
+        };
+        
+    } catch (error) {
+        return {
+            status: 'error',
+            error: `快速分析失败: ${error.message}`
+        };
+    }
 }
 
 // 从报告中提取简介和文件树部分
