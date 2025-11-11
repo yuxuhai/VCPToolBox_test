@@ -27,14 +27,19 @@ function getReadableTimestamp() {
 }
 
 // 启动分析委托进程
-function launchDelegate(directoryPath, analysisId) {
+function launchDelegate(directoryPath, analysisId, fullAnalyze = false) {
     const delegateScript = path.join(__dirname, 'AnalysisDelegate.js');
     const logFile = path.join(DB_DIR, `${analysisId}.log`);
     
     const out = fsSync.openSync(logFile, 'a');
     const err = fsSync.openSync(logFile, 'a');
 
-    const delegateProcess = spawn('node', [delegateScript, directoryPath, analysisId], {
+    const delegateProcess = spawn('node', [
+        delegateScript,
+        directoryPath,
+        analysisId,
+        fullAnalyze ? 'full' : 'quick' // 添加分析模式参数
+    ], {
         detached: true,
         stdio: ['ignore', out, err],
         windowsHide: true
@@ -46,7 +51,7 @@ function launchDelegate(directoryPath, analysisId) {
 
 // 处理 "AnalyzeProject" 命令
 async function handleAnalyzeProject(args) {
-    const { directoryPath } = args;
+    const { directoryPath, fullAnalyze = false } = args; // 默认为 false
     if (!directoryPath || typeof directoryPath !== 'string') {
         return { status: 'error', error: 'Missing or invalid "directoryPath" parameter.' };
     }
@@ -64,12 +69,16 @@ async function handleAnalyzeProject(args) {
     const timestamp = getReadableTimestamp();
     const analysisId = `${projectName}-${timestamp}`;
     
-    // 启动后台分析进程
-    launchDelegate(directoryPath, analysisId);
+    // 启动后台分析进程，并传递分析模式
+    launchDelegate(directoryPath, analysisId, fullAnalyze);
+
+    const message = fullAnalyze
+        ? `项目 **完整** 分析任务已启动。`
+        : `项目 **快速** 分析任务已启动。`;
 
     return {
         status: 'success',
-        result: `项目分析任务已启动。\n分析ID: ${analysisId}\n你可以稍后使用 QueryAnalysis 命令查询分析报告。`
+        result: `${message}\n分析ID: ${analysisId}\n你可以稍后使用 QueryAnalysis 命令查询分析报告。`
     };
 }
 
