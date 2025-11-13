@@ -257,8 +257,8 @@ class VectorDBManager {
         for (const dirent of diaryBooks) {
             if (dirent.isDirectory()) {
                 const diaryName = dirent.name;
-                if (diaryName.startsWith('已整理')) {
-                    console.log(`[VectorDB] Ignoring folder "${diaryName}" as it is marked as organized.`);
+                if (diaryName.startsWith('已整理') || diaryName === 'VCP论坛') {
+                    console.log(`[VectorDB] Ignoring folder "${diaryName}" as it is in the exclusion list.`);
                     continue;
                 }
                 const diaryPath = path.join(DIARY_ROOT_PATH, diaryName);
@@ -611,8 +611,8 @@ class VectorDBManager {
         const handleFileChange = (filePath) => {
             console.log(`[VectorDB] File change detected: ${filePath}`);
             const diaryName = path.basename(path.dirname(filePath));
-            if (diaryName.startsWith('已整理')) {
-                console.log(`[VectorDB] Ignoring change in "${diaryName}" as it is marked as organized.`);
+            if (diaryName.startsWith('已整理') || diaryName === 'VCP论坛') {
+                console.log(`[VectorDB] Ignoring change in "${diaryName}" as it is in the exclusion list.`);
                 return;
             }
             this.scheduleDiaryBookProcessing(diaryName);
@@ -624,7 +624,7 @@ class VectorDBManager {
         const handleDirUnlink = (dirPath) => {
             const diaryName = path.basename(dirPath);
             console.log(`[VectorDB] Directory deleted: ${diaryName}`);
-            if (diaryName.startsWith('已整理')) {
+            if (diaryName.startsWith('已整理') || diaryName === 'VCP论坛') {
                 return;
             }
             // 直接清理，不需要通过 scheduleDiaryBookProcessing
@@ -921,11 +921,35 @@ class VectorDBManager {
             const tempIndexPath = `${indexPath}.tmp`;
             const tempMapPath = `${mapPath}.tmp`;
             
-            await index.writeIndex(tempIndexPath);
-            await fs.writeFile(tempMapPath, JSON.stringify(chunkMap, null, 2));
-            
-            await fs.rename(tempIndexPath, indexPath);
-            await fs.rename(tempMapPath, mapPath);
+            // ✅ 确保写入完成并验证文件存在
+            try {
+                await index.writeIndex(tempIndexPath);
+                
+                // 验证索引文件是否成功创建
+                if (!await this.fileExists(tempIndexPath)) {
+                    throw new Error(`Index file was not created at ${tempIndexPath}`);
+                }
+                
+                await fs.writeFile(tempMapPath, JSON.stringify(chunkMap, null, 2));
+                
+                // 验证map文件是否成功创建
+                if (!await this.fileExists(tempMapPath)) {
+                    throw new Error(`Map file was not created at ${tempMapPath}`);
+                }
+                
+                // 原子性重命名
+                await fs.rename(tempIndexPath, indexPath);
+                await fs.rename(tempMapPath, mapPath);
+            } catch (writeError) {
+                // 清理可能存在的临时文件
+                try {
+                    if (await this.fileExists(tempIndexPath)) await fs.unlink(tempIndexPath);
+                    if (await this.fileExists(tempMapPath)) await fs.unlink(tempMapPath);
+                } catch (cleanupError) {
+                    console.warn(`[VectorDB] Failed to cleanup temp files:`, cleanupError.message);
+                }
+                throw writeError;
+            }
 
             // 第六阶段：更新manifest
             this.manifest[diaryName] = newFileHashes;
@@ -1141,7 +1165,7 @@ class VectorDBManager {
         const diaryBooks = await fs.readdir(DIARY_ROOT_PATH, { withFileTypes: true });
         const currentDiaryNames = new Set();
         for (const dirent of diaryBooks) {
-            if (dirent.isDirectory() && !dirent.name.startsWith('已整理')) {
+            if (dirent.isDirectory() && !dirent.name.startsWith('已整理') && dirent.name !== 'VCP论坛') {
                 currentDiaryNames.add(dirent.name);
             }
         }
