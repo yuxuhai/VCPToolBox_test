@@ -77,20 +77,11 @@ function handleClientMessage(clientId, message) {
     }
 }
 
-// Direct调用接口（hybridservice 使用 processToolCall）
-async function processToolCall(params) {
-    const { command, target, text, url } = params;
-    
-    // 检查是否有连接的Chrome客户端
-    if (connectedChromes.size === 0) {
-        throw new Error('没有连接的Chrome浏览器。请确保VCPChrome扩展已安装并连接。');
-    }
-    
-    // 选择第一个连接的客户端
-    const chromeWs = Array.from(connectedChromes.values())[0];
+// 执行单个命令的辅助函数（内部使用）
+async function executeSingleCommand(chromeWs, command, target, text, url, waitForPageInfo = false) {
     const requestId = `cb-req-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     
-    console.log(`[ChromeBridge] 🚀 执行命令: ${command}, requestId: ${requestId}`);
+    console.log(`[ChromeBridge] 🚀 执行命令: ${command}, requestId: ${requestId}, 等待页面信息: ${waitForPageInfo}`);
     
     // 构建命令消息
     const commandMessage = {
@@ -101,7 +92,7 @@ async function processToolCall(params) {
             target,
             text,
             url,
-            wait_for_page_info: true // 始终等待页面信息
+            wait_for_page_info: waitForPageInfo
         }
     };
     
@@ -120,7 +111,7 @@ async function processToolCall(params) {
             resolve,
             reject,
             timeout,
-            waitForPageInfo: true,
+            waitForPageInfo,
             commandExecuted: false,
             executionMessage: null
         });
@@ -139,6 +130,15 @@ async function processToolCall(params) {
                         pendingCommands.delete(requestId);
                         chromeWs.removeListener('message', messageListener);
                         reject(new Error(msg.data.error || '命令执行失败'));
+                    } else if (!waitForPageInfo) {
+                        // 不需要等待页面信息，直接返回
+                        clearTimeout(pending.timeout);
+                        pendingCommands.delete(requestId);
+                        chromeWs.removeListener('message', messageListener);
+                        resolve({
+                            success: true,
+                            message: msg.data.message || '命令执行成功'
+                        });
                     } else {
                         // 命令执行成功，标记并等待页面信息
                         console.log(`[ChromeBridge] ✅ 命令执行成功，等待页面刷新...`);
@@ -154,6 +154,71 @@ async function processToolCall(params) {
         
         chromeWs.on('message', messageListener);
     });
+}
+
+// Direct调用接口（hybridservice 使用 processToolCall）
+async function processToolCall(params) {
+    // 检查是否有连接的Chrome客户端
+    if (connectedChromes.size === 0) {
+        throw new Error('没有连接的Chrome浏览器。请确保VCPChrome扩展已安装并连接。');
+    }
+    
+    // 选择第一个连接的客户端
+    const chromeWs = Array.from(connectedChromes.values())[0];
+    
+    // 提取所有命令参数
+    const commands = [];
+    let commandIndex = 1;
+    
+    // 检查是否有编号的命令（command1, command2, ...）
+    while (params[`command${commandIndex}`]) {
+        commands.push({
+            command: params[`command${commandIndex}`],
+            target: params[`target${commandIndex}`],
+            text: params[`text${commandIndex}`],
+            url: params[`url${commandIndex}`]
+        });
+        commandIndex++;
+    }
+    
+    // 如果没有编号命令，检查单个命令
+    if (commands.length === 0 && params.command) {
+        commands.push({
+            command: params.command,
+            target: params.target,
+            text: params.text,
+            url: params.url
+        });
+    }
+    
+    if (commands.length === 0) {
+        throw new Error('未提供任何命令参数');
+    }
+    
+    console.log(`[ChromeBridge] 📋 收到 ${commands.length} 个命令，准备串行执行`);
+    
+    // 串行执行所有命令
+    for (let i = 0; i < commands.length; i++) {
+        const cmd = commands[i];
+        const isLastCommand = (i === commands.length - 1);
+        
+        console.log(`[ChromeBridge] 执行命令 ${i + 1}/${commands.length}: ${cmd.command}`);
+        
+        // 只有最后一个命令需要等待页面信息
+        await executeSingleCommand(
+            chromeWs,
+            cmd.command,
+            cmd.target,
+            cmd.text,
+            cmd.url,
+            isLastCommand
+        );
+        
+        console.log(`[ChromeBridge] ✅ 命令 ${i + 1}/${commands.length} 完成`);
+    }
+    
+    // executeSingleCommand的最后一个调用已经返回了包含页面信息的结果
+    // 这里实际上永远不会到达，因为最后一个命令的Promise会resolve
 }
 
 function shutdown() {

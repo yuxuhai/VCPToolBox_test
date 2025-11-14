@@ -597,11 +597,39 @@ document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
         console.log('[VCP Content] 👁️ 标签页变为可见，标记为活动');
         isActiveTab = true;
-        sendPageInfoUpdate();
+        // 立即验证并发送更新
+        chrome.runtime.sendMessage({ type: 'VERIFY_ACTIVE_TAB' }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.log('[VCP Content] ⚠️ 验证活动状态失败:', chrome.runtime.lastError.message);
+                return;
+            }
+            if (response && response.isActive) {
+                console.log('[VCP Content] ✅ 确认为活动标签页，清除缓存并发送更新');
+                lastPageContent = ''; // 清除缓存确保发送最新内容
+                sendPageInfoUpdate();
+            } else {
+                console.log('[VCP Content] ⚠️ 非活动标签页，不发送更新');
+                isActiveTab = false;
+            }
+        });
     } else {
         console.log('[VCP Content] 🙈 标签页变为隐藏，取消活动标记');
         isActiveTab = false;
     }
+});
+
+// 新增：窗口获得焦点时也检查并更新
+window.addEventListener('focus', () => {
+    console.log('[VCP Content] 🎯 窗口获得焦点，验证活动状态');
+    chrome.runtime.sendMessage({ type: 'VERIFY_ACTIVE_TAB' }, (response) => {
+        if (chrome.runtime.lastError) return;
+        if (response && response.isActive && !isActiveTab) {
+            console.log('[VCP Content] ✅ 焦点事件确认为活动标签页');
+            isActiveTab = true;
+            lastPageContent = '';
+            sendPageInfoUpdate();
+        }
+    });
 });
 
 // 定期更新，但只在活动标签页时发送

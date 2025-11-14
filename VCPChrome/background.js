@@ -190,6 +190,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             isConnected: isConnected,
             isMonitoringEnabled: isMonitoringEnabled
         });
+    } else if (request.type === 'VERIFY_ACTIVE_TAB') {
+        // 新增：验证发送者是否为当前活动标签页
+        const senderTabId = sender.tab?.id;
+        const isActive = senderTabId === currentActiveTabId;
+        console.log(`[VCP Background] 🔍 验证标签页 [发送者:${senderTabId}] [活动:${currentActiveTabId}] [结果:${isActive}]`);
+        sendResponse({ isActive: isActive });
+        return true;
     } else if (request.type === 'TOGGLE_MONITORING') {
         // 切换页面监控状态
         isMonitoringEnabled = !isMonitoringEnabled;
@@ -392,24 +399,40 @@ function broadcastStatusUpdate() {
 
 // 监听标签页切换
 chrome.tabs.onActivated.addListener((activeInfo) => {
+    const previousTabId = currentActiveTabId;
     currentActiveTabId = activeInfo.tabId;
+    
+    console.log(`[VCP Background] 🔄 标签页切换 [从:${previousTabId}] [到:${activeInfo.tabId}]`);
     
     // 获取标签页详细信息并打印
     chrome.tabs.get(activeInfo.tabId, (tab) => {
         if (chrome.runtime.lastError) {
             console.log('[VCP Background] 📍 标签页切换，新活动标签页 ID:', activeInfo.tabId);
         } else {
-            console.log(`[VCP Background] 🎯 检测到当前激活标签页 [ID:${tab.id}] 标题:《${tab.title}》 URL:${tab.url}`);
+            console.log(`[VCP Background] 🎯 当前激活标签页 [ID:${tab.id}] 标题:《${tab.title}》 URL:${tab.url}`);
         }
     });
     
     // 只有在监控开启时才请求更新
     if (isMonitoringEnabled) {
-        chrome.tabs.sendMessage(activeInfo.tabId, { type: 'REQUEST_PAGE_INFO_UPDATE' }).catch(e => {
-            if (!e.message.includes("Could not establish connection")) {
-                console.log("Error sending to content script on tab activation:", e.message);
-            }
-        });
+        // 使用重试机制发送更新请求，因为content script可能还未完全准备好
+        const sendUpdateRequest = (retryCount = 0) => {
+            chrome.tabs.sendMessage(activeInfo.tabId, { type: 'REQUEST_PAGE_INFO_UPDATE' }, (response) => {
+                if (chrome.runtime.lastError) {
+                    if (retryCount < 2) { // 最多重试2次
+                        console.log(`[VCP Background] ⚠️ 发送更新请求失败，${200 * (retryCount + 1)}ms后重试 (${retryCount + 1}/2)`);
+                        setTimeout(() => sendUpdateRequest(retryCount + 1), 200 * (retryCount + 1));
+                    } else if (!chrome.runtime.lastError.message.includes("Could not establish connection")) {
+                        console.log("[VCP Background] ❌ 发送更新请求最终失败:", chrome.runtime.lastError.message);
+                    }
+                } else {
+                    console.log(`[VCP Background] ✅ 成功发送更新请求到标签页 ${activeInfo.tabId}`);
+                }
+            });
+        };
+        
+        // 立即发送第一次，如果失败会自动重试
+        sendUpdateRequest();
     }
 });
 
@@ -417,23 +440,38 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     // 当导航开始时，清除内容脚本的状态以防止内容累积
     if (changeInfo.status === 'loading' && tab.active) {
+        console.log(`[VCP Background] 🔄 活动标签页开始加载 [ID:${tabId}]`);
         chrome.tabs.sendMessage(tabId, { type: 'CLEAR_STATE' }).catch(e => {
             if (!e.message.includes("Could not establish connection")) {
                 console.log("Error sending CLEAR_STATE:", e.message);
             }
         });
     }
-    // 只在活动标签页加载完成时请求更新（且监控已开启）
+    
+    // 只在活动标签页加载完成时请求更新
     if (changeInfo.status === 'complete' && tab.active) {
         currentActiveTabId = tabId;
         console.log(`[VCP Background] ✅ 活动标签页加载完成 [ID:${tab.id}] 标题:《${tab.title}》`);
         
         if (isMonitoringEnabled) {
-            chrome.tabs.sendMessage(tabId, { type: 'REQUEST_PAGE_INFO_UPDATE' }).catch(e => {
-                if (!e.message.includes("Could not establish connection")) {
-                    console.log("Error sending to content script on tab update:", e.message);
-                }
-            });
+            // 页面加载完成后，稍微延迟一下再请求，让页面内容更稳定
+            setTimeout(() => {
+                const sendUpdateRequest = (retryCount = 0) => {
+                    chrome.tabs.sendMessage(tabId, { type: 'REQUEST_PAGE_INFO_UPDATE' }, (response) => {
+                        if (chrome.runtime.lastError) {
+                            if (retryCount < 3) { // 页面加载后可以多重试几次
+                                console.log(`[VCP Background] ⚠️ 页面加载完成后请求失败，${300 * (retryCount + 1)}ms后重试 (${retryCount + 1}/3)`);
+                                setTimeout(() => sendUpdateRequest(retryCount + 1), 300 * (retryCount + 1));
+                            } else if (!chrome.runtime.lastError.message.includes("Could not establish connection")) {
+                                console.log("[VCP Background] ❌ 页面加载后更新请求最终失败:", chrome.runtime.lastError.message);
+                            }
+                        } else {
+                            console.log(`[VCP Background] ✅ 成功请求页面加载后的更新 [ID:${tabId}]`);
+                        }
+                    });
+                };
+                sendUpdateRequest();
+            }, 300); // 等待300ms让页面更稳定
         }
     }
 });
