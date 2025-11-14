@@ -160,13 +160,25 @@ function formatInteractiveElement(el) {
     const vcpId = `vcp-id-${vcpIdCounter}`;
     el.setAttribute('vcp-id', vcpId);
 
-    let text = (el.innerText || el.value || el.placeholder || el.ariaLabel || el.title || '').trim().replace(/\s+/g, ' ');
     const tagName = el.tagName.toLowerCase();
     const role = el.getAttribute('role');
+    
+    // 对于输入类元素，使用专门的文本获取逻辑
+    const isInputElement = (tagName === 'input' || tagName === 'textarea' ||
+                           role === 'combobox' || role === 'searchbox' || role === 'textbox');
+    
+    let text;
+    if (isInputElement) {
+        // 输入元素：优先级 placeholder > aria-label > title > name > id > value
+        text = (el.placeholder || el.ariaLabel || el.title || el.name || el.id || el.value || '').trim().replace(/\s+/g, ' ');
+    } else {
+        // 非输入元素：保持原有逻辑
+        text = (el.innerText || el.value || el.placeholder || el.ariaLabel || el.title || '').trim().replace(/\s+/g, ' ');
+    }
 
     if (role === 'combobox' || role === 'searchbox') {
         const label = findLabelForInput(el);
-        return `[输入框: ${label || text || el.name || el.id || '无标题输入框'}](${vcpId})`;
+        return `[搜索框: ${label || text || '搜索'}](${vcpId})`;
     }
 
     if (tagName === 'a' && el.href) {
@@ -179,12 +191,18 @@ function formatInteractiveElement(el) {
 
     if (tagName === 'input' && !['button', 'submit', 'reset', 'hidden'].includes(el.type)) {
         const label = findLabelForInput(el);
-        return `[输入框: ${label || text || el.name || el.id || '无标题输入框'}](${vcpId})`;
+        // 根据input类型决定显示名称
+        const inputType = el.type || 'text';
+        const typeName = inputType === 'search' ? '搜索框' : '输入框';
+        return `[${typeName}: ${label || text || el.name || el.id || '无标题输入框'}](${vcpId})`;
     }
 
     if (tagName === 'textarea') {
         const label = findLabelForInput(el);
-        return `[文本区域: ${label || text || el.name || el.id || '无标题文本区域'}](${vcpId})`;
+        // 检查是否可能是搜索框（通过 placeholder 或其他属性判断）
+        const isSearchBox = /搜索|search/i.test(text) || /搜索|search/i.test(el.className);
+        const typeName = isSearchBox ? '搜索框' : '输入框';
+        return `[${typeName}: ${label || text || el.name || el.id || '文本输入'}](${vcpId})`;
     }
 
     if (tagName === 'select') {
