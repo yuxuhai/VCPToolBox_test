@@ -711,16 +711,29 @@ class VectorDBManager {
     }
 
     /**
-     * ✅ 通用原子写入方法
+     * ✅ 通用原子写入方法（Windows 兼容）
      */
     async atomicWriteFile(filePath, data) {
         const tempPath = `${filePath}.tmp`;
         try {
             await fs.writeFile(tempPath, data);
+            
+            // ✅ Windows 兼容：如果目标文件存在，先删除再重命名
+            // 在 Windows 上，fs.rename() 不能覆盖现有文件
+            try {
+                await fs.unlink(filePath);
+            } catch (e) {
+                // 文件不存在是正常情况，忽略 ENOENT 错误
+                if (e.code !== 'ENOENT') {
+                    throw e;
+                }
+            }
+            
             await fs.rename(tempPath, filePath);
             this.debugLog(`Atomically wrote to ${path.basename(filePath)}`);
         } catch (error) {
             console.error(`[VectorDB] Failed to write ${filePath}:`, error);
+            // 清理临时文件
             try {
                 if (await this.fileExists(tempPath)) {
                     await fs.unlink(tempPath);
