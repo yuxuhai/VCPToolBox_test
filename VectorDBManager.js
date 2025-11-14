@@ -716,6 +716,10 @@ class VectorDBManager {
     async atomicWriteFile(filePath, data) {
         const tempPath = `${filePath}.tmp`;
         try {
+            // ✅ 确保父目录存在
+            const dir = path.dirname(filePath);
+            await fs.mkdir(dir, { recursive: true });
+            
             await fs.writeFile(tempPath, data);
             
             // ✅ Windows 兼容：如果目标文件存在，先删除再重命名
@@ -732,7 +736,12 @@ class VectorDBManager {
             await fs.rename(tempPath, filePath);
             this.debugLog(`Atomically wrote to ${path.basename(filePath)}`);
         } catch (error) {
-            console.error(`[VectorDB] Failed to write ${filePath}:`, error);
+            console.error(`[VectorDB] Failed to write ${filePath}:`, {
+                path: tempPath,
+                dest: filePath,
+                error: error.message,
+                code: error.code
+            });
             // 清理临时文件
             try {
                 if (await this.fileExists(tempPath)) {
