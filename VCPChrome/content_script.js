@@ -460,8 +460,8 @@ function findElementWithLogging(target) {
 }
 
 function sendPageInfoUpdate() {
-    // 关键检查：只有活动标签页才发送更新
-    if (!isActiveTab && !document.hidden) {
+    // 关键检查：只有活动标签页才发送更新（或页面刚加载完成时）
+    if (!isActiveTab && document.hidden) {
         console.log('[VCP Content] ⚠️ 当前非活动标签页，跳过更新');
         return;
     }
@@ -589,9 +589,8 @@ window.addEventListener('load', () => {
     // 页面加载时检查是否为活动标签页
     isActiveTab = !document.hidden;
     console.log('[VCP Content] 📄 页面加载完成，活动状态:', isActiveTab);
-    if (isActiveTab) {
-        sendPageInfoUpdate();
-    }
+    // 页面加载完成后总是尝试发送一次更新
+    sendPageInfoUpdate();
 });
 
 document.addEventListener('visibilitychange', () => {

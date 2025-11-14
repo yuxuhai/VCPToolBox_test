@@ -58,7 +58,11 @@ function connect() {
                         fullUrl = 'https://' + fullUrl;
                     }
                     console.log('Attempting to create tab with URL:', fullUrl);
-                    chrome.tabs.create({ url: fullUrl }, (tab) => {
+                    
+                    // 如果命令请求等待页面信息，则不立即发送成功响应
+                    const shouldWaitForPageInfo = commandData.wait_for_page_info === true;
+                    
+                    chrome.tabs.create({ url: fullUrl, active: true }, (tab) => {
                         if (chrome.runtime.lastError) {
                             const errorMessage = `创建标签页失败: ${chrome.runtime.lastError.message}`;
                             console.error('Error creating tab:', errorMessage);
@@ -67,6 +71,7 @@ function connect() {
                                     type: 'command_result',
                                     data: {
                                         requestId: commandData.requestId,
+                                        sourceClientId: commandData.sourceClientId,
                                         status: 'error',
                                         error: errorMessage
                                     }
@@ -74,16 +79,61 @@ function connect() {
                             }
                         } else {
                             console.log('Tab created successfully. Tab ID:', tab.id, 'URL:', tab.url);
-                            if (ws && ws.readyState === WebSocket.OPEN) {
+                            
+                            // 如果不需要等待页面信息，立即发送成功响应
+                            if (!shouldWaitForPageInfo && ws && ws.readyState === WebSocket.OPEN) {
                                 ws.send(JSON.stringify({
                                     type: 'command_result',
                                     data: {
                                         requestId: commandData.requestId,
-                                        sourceClientId: commandData.sourceClientId, // 确保返回 sourceClientId
+                                        sourceClientId: commandData.sourceClientId,
                                         status: 'success',
                                         message: `成功打开URL: ${commandData.url}`
                                     }
                                 }));
+                            } else {
+                                // 需要等待页面信息，监听标签页加载完成
+                                console.log(`[VCP Background] ⏳ 等待新标签页 [ID:${tab.id}] 加载完成...`);
+                                
+                                const tabUpdateListener = (tabId, changeInfo, updatedTab) => {
+                                    if (tabId === tab.id && changeInfo.status === 'complete') {
+                                        console.log(`[VCP Background] ✅ 新标签页 [ID:${tab.id}] 加载完成`);
+                                        
+                                        // 移除监听器
+                                        chrome.tabs.onUpdated.removeListener(tabUpdateListener);
+                                        
+                                        // 现在发送成功响应
+                                        if (ws && ws.readyState === WebSocket.OPEN) {
+                                            ws.send(JSON.stringify({
+                                                type: 'command_result',
+                                                data: {
+                                                    requestId: commandData.requestId,
+                                                    sourceClientId: commandData.sourceClientId,
+                                                    status: 'success',
+                                                    message: `成功打开URL: ${commandData.url}`
+                                                }
+                                            }));
+                                        }
+                                        
+                                        // 等待一小段时间让页面内容稳定，然后请求页面信息
+                                        setTimeout(() => {
+                                            chrome.tabs.sendMessage(tab.id, {
+                                                type: 'REQUEST_PAGE_INFO_UPDATE'
+                                            }).catch(e => {
+                                                console.log('[VCP Background] ⚠️ 请求新标签页信息失败:', e.message);
+                                            });
+                                        }, 500);
+                                    }
+                                };
+                                
+                                // 添加监听器
+                                chrome.tabs.onUpdated.addListener(tabUpdateListener);
+                                
+                                // 设置超时保护（30秒）
+                                setTimeout(() => {
+                                    chrome.tabs.onUpdated.removeListener(tabUpdateListener);
+                                    console.log('[VCP Background] ⚠️ 等待新标签页加载超时');
+                                }, 30000);
                             }
                         }
                     });
@@ -173,18 +223,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // 不再立即返回状态，而是等待广播
         // sendResponse({ isConnected: !isConnected });
     } else if (request.type === 'PAGE_INFO_UPDATE') {
-        // 检查1：监控是否开启
-        if (!isMonitoringEnabled) {
-            console.log('[VCP Background] ⚠️ 页面监控未开启，忽略更新');
-            return true;
-        }
-        
-        // 检查2：只接受来自当前活动标签页的更新
         const senderTabId = sender.tab?.id;
         
+        // 检查1：只接受来自当前活动标签页的更新
         if (senderTabId !== currentActiveTabId) {
             console.log(`[VCP Background] ⚠️ 忽略非活动标签页的更新 [来源ID:${senderTabId} vs 活动ID:${currentActiveTabId}]`);
             return true;
+        }
+        
+        // 检查2：监控是否开启（但新标签页的首次更新仍然会被发送）
+        if (!isMonitoringEnabled) {
+            console.log('[VCP Background] ⚠️ 页面监控未开启，但仍处理活动标签页的更新');
         }
         
         console.log(`[VCP Background] ✅ 接受活动标签页 [ID:${senderTabId}] 的更新`);
