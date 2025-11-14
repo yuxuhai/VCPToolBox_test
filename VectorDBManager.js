@@ -513,6 +513,14 @@ class VectorDBManager {
     }
 
     runFullRebuildWorker(diaryName) {
+        // ✅ 防止重复启动 Worker
+        if (this.activeWorkers.has(diaryName)) {
+            console.warn(`[VectorDB] Full rebuild worker for "${diaryName}" is already running. Skipping duplicate request.`);
+            return;
+        }
+        
+        this.activeWorkers.add(diaryName); // ✅ 立即标记为活动，防止竞态条件
+        
         const worker = new Worker(path.resolve(__dirname, 'vectorizationWorker.js'), {
             workerData: {
                 task: 'fullRebuild',
@@ -537,7 +545,6 @@ class VectorDBManager {
                 console.log(`[VectorDB] Worker successfully completed full rebuild for "${message.diaryName}".`);
             } else if (message.status === 'error') {
                 console.error(`[VectorDB] Worker failed for "${message.diaryName}":`, message.error);
-                // ✅ 修复：记录失败，防止无限重试
                 this.recordFailedRebuild(message.diaryName, message.error);
             } else {
                 console.error(`[VectorDB] Worker failed to process "${message.diaryName}" with an unknown message status:`, message);
@@ -548,9 +555,12 @@ class VectorDBManager {
         worker.on('error', (error) => {
             console.error(`[VectorDB] Worker error for "${diaryName}":`, error);
             this.recordFailedRebuild(diaryName, error.message);
+            // ✅ Worker 启动失败时立即清理
+            this.activeWorkers.delete(diaryName);
         });
         
         worker.on('exit', (code) => {
+            // ✅ 确保清理（幂等操作）
             this.activeWorkers.delete(diaryName);
             if (code !== 0) {
                 console.error(`[VectorDB] Worker exited with code ${code} for "${diaryName}"`);
@@ -773,6 +783,10 @@ class VectorDBManager {
         const { diaryName, chunksToAdd, labelsToDelete, newFileHashes } = changeset;
 
         await this.acquireLock(diaryName);
+        
+        // ✅ 定义标志，判断是否需要触发全量重建
+        let shouldTriggerFullRebuild = false;
+        
         try {
             const safeFileNameBase = Buffer.from(diaryName, 'utf-8').toString('base64url');
             const indexPath = path.join(VECTOR_STORE_PATH, `${safeFileNameBase}.bin`);
@@ -1027,11 +1041,17 @@ class VectorDBManager {
                 console.error(`[VectorDB] Failed to restore from backup:`, restoreError);
             }
             
+            // ✅ 标记需要全量重建，但不在锁内执行
+            shouldTriggerFullRebuild = true;
+        } finally {
+            this.releaseLock(diaryName); // ✅ 先释放锁
+        }
+        
+        // ✅ 在锁外触发全量重建，避免死锁和重复清理问题
+        if (shouldTriggerFullRebuild) {
             console.log(`[VectorDB] Scheduling full rebuild for "${diaryName}" after failed incremental update.`);
             this.runFullRebuildWorker(diaryName);
-            shouldCleanupInFinally = false; // ✅ 添加这行！Worker 会在 exit 事件中清理
-        } finally {
-            this.releaseLock(diaryName); // ✅ 释放锁
+            // ⚠️ 注意：activeWorkers 的清理由 runFullRebuildWorker 的 exit 事件处理
         }
     }
 
