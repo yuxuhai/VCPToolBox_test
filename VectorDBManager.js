@@ -374,6 +374,15 @@ class VectorDBManager {
                 setImmediate(() => {
                     this.rebuildIndexFromDatabase(diaryName).catch(err => {
                         console.error(`[VectorDB] Background repair failed for "${diaryName}":`, err.message);
+                        // ✅ Bug修复2：检查activeWorkers状态再启动Worker
+                        if (!this.activeWorkers.has(diaryName)) {
+                            const workerStarted = this.runFullRebuildWorker(diaryName);
+                            if (!workerStarted) {
+                                console.error(`[VectorDB] Failed to start recovery worker for "${diaryName}"`);
+                            }
+                        } else {
+                            console.log(`[VectorDB] "${diaryName}" is already being processed, skip recovery`);
+                        }
                     });
                 });
                 return false; // 已经处理，不需要再触发更新
@@ -385,8 +394,15 @@ class VectorDBManager {
             setImmediate(() => {
                 this.rebuildIndexFromDatabase(diaryName).catch(err => {
                     console.error(`[VectorDB] Background rebuild failed for "${diaryName}":`, err.message);
-                    // 如果修复失败，触发Full Rebuild
-                    this.runFullRebuildWorker(diaryName);
+                    // ✅ Bug修复2：检查activeWorkers状态再启动Worker
+                    if (!this.activeWorkers.has(diaryName)) {
+                        const workerStarted = this.runFullRebuildWorker(diaryName);
+                        if (!workerStarted) {
+                            console.error(`[VectorDB] Failed to start recovery worker for "${diaryName}"`);
+                        }
+                    } else {
+                        console.log(`[VectorDB] "${diaryName}" is already being processed, skip recovery`);
+                    }
                 });
             });
             return false; // 已经处理
@@ -594,6 +610,9 @@ class VectorDBManager {
             this.releaseLock(lockKey);
         }
 
+        // ✅ Bug修复4：追踪Worker是否接管管理
+        let workerTookOver = false;
+        
         // ✅ 无论后续执行什么路径，都要确保清理 activeWorkers
         try {
             const diaryPath = path.join(DIARY_ROOT_PATH, diaryName);
@@ -626,7 +645,12 @@ class VectorDBManager {
 
             if (forceFullRebuild) {
                 console.log(`[VectorDB] Full rebuild forced for "${diaryName}" due to data integrity issues.`);
-                this.runFullRebuildWorker(diaryName);
+                // ✅ Bug修复4：删除后立即转交
+                this.activeWorkers.delete(diaryName);
+                const workerStarted = this.runFullRebuildWorker(diaryName);
+                if (workerStarted) {
+                    workerTookOver = true; // ✅ Worker接管管理
+                }
                 return;
             }
             
@@ -634,14 +658,13 @@ class VectorDBManager {
      
             if (totalOldChunks === 0 || changeRatio > this.config.changeThreshold) {
                 console.log(`[VectorDB] Major changes detected (${(changeRatio * 100).toFixed(1)}%). Scheduling a full rebuild for "${diaryName}".`);
-                // ✅ runFullRebuildWorker 会接管 activeWorkers，所以我们先删除
+                // ✅ Bug修复4：删除后立即转交
                 this.activeWorkers.delete(diaryName);
                 const workerStarted = this.runFullRebuildWorker(diaryName);
-                if (!workerStarted) {
-                    // Worker启动失败，不需要清理（已经删除了）
-                    console.log(`[VectorDB] Worker failed to start for "${diaryName}", activeWorker already cleared`);
+                if (workerStarted) {
+                    workerTookOver = true; // ✅ Worker接管管理
                 }
-                return; // ✅ Worker会自己管理activeWorkers的清理
+                return;
             } else if (chunksToAdd.length > 0 || labelsToDelete.length > 0) {
                 console.log(`[VectorDB] Minor changes detected. Applying incremental update for "${diaryName}".`);
                 // ✅ activeWorkers已经在入口处添加了，直接执行
@@ -655,10 +678,8 @@ class VectorDBManager {
             console.error(`[VectorDB] Failed to process diary book "${diaryName}":`, error);
             // ✅ 错误会在finally块统一清理
         } finally {
-            // ✅ 统一清理activeWorkers（除非已经转交给Worker）
-            // 如果启动了Worker，activeWorkers已经被删除并转交给Worker管理
-            // 否则，需要在这里清理
-            if (this.activeWorkers.has(diaryName)) {
+            // ✅ Bug修复4：只有非Worker分支才清理
+            if (!workerTookOver && this.activeWorkers.has(diaryName)) {
                 this.activeWorkers.delete(diaryName);
                 console.log(`[VectorDB] Cleared activeWorker for "${diaryName}"`);
             }
@@ -1399,34 +1420,35 @@ class VectorDBManager {
         } catch (error) {
             console.error(`[VectorDB] Critical error during changeset application for "${diaryName}":`, error);
             
-            // ✅ 不尝试从备份恢复！直接触发原子化修复
-            console.log(`[VectorDB] Will rebuild index from database for "${diaryName}" (atomic repair)`);
-            shouldTriggerFullRebuild = false;
+            // ✅ 修复死锁Bug：不在锁内调用rebuildIndexFromDatabase
+            console.log(`[VectorDB] Will schedule atomic repair after releasing lock`);
             
-            // 触发原子化修复
+            // ✅ 标记需要原子修复，在finally块释放锁后执行
+            shouldTriggerFullRebuild = true;
+        } finally {
+            this.releaseLock(diaryName); // ✅ 先释放锁
+        }
+        
+        // ✅ Bug修复：在锁外执行修复，避免死锁
+        if (shouldTriggerFullRebuild) {
+            console.log(`[VectorDB] Attempting atomic repair for "${diaryName}" after failed incremental update.`);
+            
+            // ✅ 先尝试原子修复（从数据库重建索引）
             try {
                 await this.rebuildIndexFromDatabase(diaryName);
                 console.log(`[VectorDB] Successfully rebuilt index from database for "${diaryName}"`);
             } catch (rebuildError) {
                 console.error(`[VectorDB] Atomic repair failed for "${diaryName}":`, rebuildError);
-                shouldTriggerFullRebuild = true;
+                console.log(`[VectorDB] Scheduling full rebuild worker as fallback`);
+                
+                // ✅ 原子修复失败，启动Worker进行完整重建
+                const workerStarted = this.runFullRebuildWorker(diaryName);
+                if (!workerStarted) {
+                    // Worker启动失败，需要清理activeWorkers
+                    this.activeWorkers.delete(diaryName);
+                    console.log(`[VectorDB] Worker failed to start, cleared activeWorker for "${diaryName}"`);
+                }
             }
-        } finally {
-            this.releaseLock(diaryName); // ✅ 先释放锁
-        }
-        
-        // ✅ 在锁外触发全量重建，避免死锁
-        if (shouldTriggerFullRebuild) {
-            console.log(`[VectorDB] Scheduling full rebuild for "${diaryName}" after failed incremental update.`);
-            // ✅ 确保activeWorkers已经在调用者那里添加了
-            // runFullRebuildWorker会接管管理
-            const workerStarted = this.runFullRebuildWorker(diaryName);
-            if (!workerStarted) {
-                // Worker启动失败，需要清理activeWorkers
-                this.activeWorkers.delete(diaryName);
-                console.log(`[VectorDB] Worker failed to start, cleared activeWorker for "${diaryName}"`);
-            }
-            // ✅ 如果Worker启动成功，它的exit事件会清理activeWorkers
         }
     }
 
@@ -1799,9 +1821,11 @@ class VectorDBManager {
         
         const lockKey = 'usage_stats';
         let bufferSnapshot; // ✅ 在外部作用域定义，避免catch块中未定义
+        let lockAcquired = false; // ✅ Bug修复3：追踪锁状态
         
         try {
             await this.acquireLock(lockKey);
+            lockAcquired = true; // ✅ 标记锁已获取
             
             bufferSnapshot = new Map(this.usageStatsBuffer);
             this.usageStatsBuffer.clear();
@@ -1835,7 +1859,9 @@ class VectorDBManager {
                 }, 10000);
             }
         } finally {
-            this.releaseLock(lockKey);
+            if (lockAcquired) { // ✅ Bug修复3：只释放已持有的锁
+                this.releaseLock(lockKey);
+            }
         }
     }
 
