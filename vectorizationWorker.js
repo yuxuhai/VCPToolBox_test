@@ -16,16 +16,31 @@ const { processSingleDiaryBookInWorker } = require('./VectorDBManager.js');
  * that receives all necessary data and configuration from the main thread.
  */
 async function run() {
-    if (!parentPort) return;
+    if (!parentPort) {
+        console.error('[VectorDB][Worker] No parentPort available!');
+        return;
+    }
 
     const { task, diaryName, config, chunksToAdd } = workerData;
+    
+    console.log(`[VectorDB][Worker] Worker started with task: ${task}, diaryName: ${diaryName}`);
+    console.log(`[VectorDB][Worker] Config present: ${!!config}, API Key present: ${!!config?.apiKey}`);
 
     try {
         switch (task) {
             case 'fullRebuild':
-                if (!diaryName || !config) throw new Error('Worker (fullRebuild) started without required diaryName or config.');
+                if (!diaryName || !config) {
+                    throw new Error('Worker (fullRebuild) started without required diaryName or config.');
+                }
                 console.log(`[VectorDB][Worker] Starting full rebuild for: ${diaryName}`);
+                console.log(`[VectorDB][Worker] API URL: ${config.apiUrl}`);
+                console.log(`[VectorDB][Worker] Embedding Model: ${config.embeddingModel}`);
+                
                 const newManifestEntry = await processSingleDiaryBookInWorker(diaryName, config);
+                
+                console.log(`[VectorDB][Worker] Full rebuild completed for: ${diaryName}`);
+                console.log(`[VectorDB][Worker] Result keys: ${Object.keys(newManifestEntry || {}).length}`);
+                
                 if (newManifestEntry) {
                     parentPort.postMessage({ status: 'success', task: 'fullRebuild', diaryName, newManifestEntry });
                 } else {
@@ -48,14 +63,18 @@ async function run() {
                 throw new Error(`Unknown task type received: ${task}`);
         }
     } catch (error) {
-        console.error(`[VectorDB][Worker] Error during task "${task}" for "${diaryName}":`, error);
-        parentPort.postMessage({
-            status: 'error',
-            task: task,
-            diaryName: diaryName,
-            error: error.message,
-            stack: error.stack
-        });
+        console.error(`[VectorDB][Worker] ❌ Critical error during task "${task}" for "${diaryName}":`, error);
+        console.error(`[VectorDB][Worker] Error stack:`, error.stack);
+        
+        if (parentPort) {
+            parentPort.postMessage({
+                status: 'error',
+                task: task,
+                diaryName: diaryName,
+                error: error.message,
+                stack: error.stack
+            });
+        }
     }
 }
 

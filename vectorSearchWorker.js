@@ -1,23 +1,26 @@
 // vectorSearchWorker.js
 const { parentPort } = require('worker_threads');
 const path = require('path');
-const fs = require('fs').promises;
 const { HierarchicalNSW } = require('hnswlib-node');
+const VectorDBStorage = require('./VectorDBStorage.js');
 
 async function performSearch(workerData) {
     const { diaryName, queryVector, k, efSearch, vectorStorePath } = workerData;
+    
+    let storage = null;
 
     try {
         const safeFileNameBase = Buffer.from(diaryName, 'utf-8').toString('base64url');
         const indexPath = path.join(vectorStorePath, `${safeFileNameBase}.bin`);
-        const mapPath = path.join(vectorStorePath, `${safeFileNameBase}_map.json`);
 
-        // 1. 加载索引和映射文件
+        // 1. 加载索引和从SQLite读取chunkMap
         const index = new HierarchicalNSW('l2', queryVector.length);
         await index.readIndex(indexPath);
         
-        const mapData = await fs.readFile(mapPath, 'utf-8');
-        const chunkMap = JSON.parse(mapData);
+        // ✅ 使用SQLite读取chunkMap
+        storage = new VectorDBStorage(vectorStorePath);
+        storage.db = require('better-sqlite3')(path.join(vectorStorePath, 'vectordb.sqlite'), { readonly: true });
+        const chunkMap = storage.getChunkMap(diaryName);
 
         // 2. 验证索引状态
         if (index.getCurrentCount() === 0) {
@@ -41,6 +44,15 @@ async function performSearch(workerData) {
 
     } catch (error) {
         parentPort.postMessage({ status: 'error', error: error.message });
+    } finally {
+        // ✅ 清理：关闭数据库连接
+        if (storage && storage.db) {
+            try {
+                storage.db.close();
+            } catch (e) {
+                // ignore
+            }
+        }
     }
 }
 
