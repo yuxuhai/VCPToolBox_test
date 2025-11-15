@@ -617,10 +617,15 @@ class TagVectorManager {
     }
 
     /**
-     * 批量向量化指定的Tags（带进度显示）
+     * 批量向量化指定的Tags（带进度显示 + checkpoint机制）
      */
     async vectorizeTagBatch(tags) {
         const batchSize = this.config.tagBatchSize;
+        const SAVE_INTERVAL = 10; // ✅ 每10批次保存一次（1000个tags）
+        let batchesSinceLastSave = 0;
+        
+        const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
+        const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
         
         for (let i = 0; i < tags.length; i += batchSize) {
             const batch = tags.slice(i, i + batchSize);
@@ -639,10 +644,35 @@ class TagVectorManager {
                         tagData.vector = vectors[j];
                     }
                 }
+                
+                batchesSinceLastSave++;
+                
+                // ✅ 定期保存checkpoint
+                if (batchesSinceLastSave >= SAVE_INTERVAL) {
+                    const vectorizedCount = Array.from(this.globalTags.values()).filter(d => d.vector !== null).length;
+                    console.log(`[TagVectorManager] 💾 Checkpoint: Saving ${vectorizedCount} vectorized tags...`);
+                    
+                    try {
+                        await this.saveGlobalTagLibrary(indexPath, dataPath);
+                        console.log(`[TagVectorManager] ✅ Checkpoint saved successfully`);
+                        batchesSinceLastSave = 0;
+                    } catch (saveError) {
+                        console.error(`[TagVectorManager] Failed to save checkpoint:`, saveError.message);
+                        // 继续向量化，下次再试
+                    }
+                }
+                
             } catch (error) {
                 console.error(`[TagVectorManager] Failed to vectorize batch:`, error.message);
                 // 继续处理下一批，避免全部失败
             }
+        }
+        
+        // ✅ 最后一次保存（确保所有数据都被保存）
+        if (batchesSinceLastSave > 0) {
+            const vectorizedCount = Array.from(this.globalTags.values()).filter(d => d.vector !== null).length;
+            console.log(`[TagVectorManager] 💾 Final save: ${vectorizedCount} vectorized tags`);
+            await this.saveGlobalTagLibrary(indexPath, dataPath);
         }
     }
 
