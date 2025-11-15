@@ -91,12 +91,16 @@ class TagVectorManager {
             await this.saveGlobalTagLibrary(tagIndexPath, tagDataPath);
         }
 
-        // ✅ 关键修复：即使库存在，也要检查是否有新增Tag（异步执行，不阻塞启动）
+        // ✅ 关键修复：即使库存在，也要检查是否有新增Tag（同步执行，确保数据一致性）
         if (libraryExists) {
-            console.log('[TagVectorManager] 🔍 Checking for new tags (async)...');
-            this.performIncrementalUpdate(tagIndexPath, tagDataPath).catch(err => {
-                console.error('[TagVectorManager] Incremental update failed:', err.message);
-            });
+            console.log('[TagVectorManager] 🔍 Checking for new tags...');
+            const hasChanges = await this.incrementalUpdateOptimized();
+            if (hasChanges) {
+                await this.saveGlobalTagLibrary(tagIndexPath, tagDataPath);
+                console.log('[TagVectorManager] ✅ Incremental update completed');
+            } else {
+                console.log('[TagVectorManager] No changes detected');
+            }
         }
 
         this.startFileWatcher();
@@ -642,28 +646,10 @@ class TagVectorManager {
     }
 
     /**
-     * 🌟 异步执行增量更新（不阻塞初始化）
-     */
-    async performIncrementalUpdate(indexPath, dataPath) {
-        try {
-            const hasNewTags = await this.incrementalUpdate();
-            if (hasNewTags) {
-                await this.saveGlobalTagLibrary(indexPath, dataPath);
-                console.log('[TagVectorManager] ✅ Incremental update completed');
-            } else {
-                console.log('[TagVectorManager] No new tags detected');
-            }
-        } catch (error) {
-            console.error('[TagVectorManager] Incremental update error:', error.message);
-            throw error;
-        }
-    }
-
-    /**
-     * 🌟 增量更新：检测新增/删除/黑名单变动
+     * 🌟 优化的增量更新：只在必要时重建索引
      * @returns {boolean} - 是否有变化
      */
-    async incrementalUpdate() {
+    async incrementalUpdateOptimized() {
         console.log('[TagVectorManager] Starting incremental update...');
         
         // Step 1: 保存旧的tags（已向量化的）+ 深拷贝向量数据
@@ -748,11 +734,13 @@ class TagVectorManager {
             await this.vectorizeTagBatch(tagsToAdd);
         }
         
-        // Step 7: 重建索引
-        if (this.globalTags.size > 0) {
-            const vectorizedCount = Array.from(this.globalTags.values()).filter(d => d.vector !== null).length;
-            console.log(`[TagVectorManager] Rebuilding HNSW index with ${vectorizedCount} vectorized tags...`);
-            this.buildHNSWIndex();
+        // Step 7: 只在有变化时重建索引
+        if (tagsToAdd.length > 0 || tagsToRemove.length > 0) {
+            if (this.globalTags.size > 0) {
+                const vectorizedCount = Array.from(this.globalTags.values()).filter(d => d.vector !== null).length;
+                console.log(`[TagVectorManager] Rebuilding HNSW index with ${vectorizedCount} vectorized tags...`);
+                this.buildHNSWIndex();
+            }
         }
         
         return true;
