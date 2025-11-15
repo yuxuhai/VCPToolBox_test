@@ -394,43 +394,96 @@ class TagVectorManager {
     }
 
     /**
-     * 保存到磁盘
+     * 保存到磁盘（分离向量和元数据，避免单个JSON过大）
      */
     async saveGlobalTagLibrary(indexPath, dataPath) {
         if (this.tagIndex) {
             await this.tagIndex.writeIndex(indexPath);
         }
 
-        const tagData = {};
+        // ✅ 分离保存：元数据和向量数据分开
+        const metaPath = dataPath.replace('.json', '_meta.json');
+        const vectorPath = dataPath.replace('.json', '_vectors.json');
+        
+        // 1. 保存轻量级元数据（tag -> frequency, diaries, hasVector标志）
+        const metaData = {};
         for (const [tag, data] of this.globalTags.entries()) {
-            tagData[tag] = {
-                vector: data.vector ? Array.from(data.vector) : null,
+            metaData[tag] = {
+                hasVector: data.vector !== null,
                 frequency: data.frequency,
                 diaries: Array.from(data.diaries)
             };
         }
-
-        await fs.writeFile(dataPath, JSON.stringify(tagData, null, 2), 'utf-8');
+        await fs.writeFile(metaPath, JSON.stringify(metaData, null, 2), 'utf-8');
+        
+        // 2. 只保存有向量的tags（压缩存储）
+        const vectorData = {};
+        for (const [tag, data] of this.globalTags.entries()) {
+            if (data.vector !== null) {
+                vectorData[tag] = Array.from(data.vector);
+            }
+        }
+        await fs.writeFile(vectorPath, JSON.stringify(vectorData), 'utf-8'); // 不格式化，减少文件大小
+        
+        console.log(`[TagVectorManager] Saved: ${Object.keys(metaData).length} tags metadata, ${Object.keys(vectorData).length} vectors`);
     }
 
     /**
-     * 从磁盘加载
+     * 从磁盘加载（支持新旧格式）
      */
     async loadGlobalTagLibrary(indexPath, dataPath) {
-        const content = await fs.readFile(dataPath, 'utf-8');
-        const tagData = JSON.parse(content);
-
+        const metaPath = dataPath.replace('.json', '_meta.json');
+        const vectorPath = dataPath.replace('.json', '_vectors.json');
+        
         this.globalTags.clear();
-        for (const [tag, data] of Object.entries(tagData)) {
-            this.globalTags.set(tag, {
-                vector: data.vector ? new Float32Array(data.vector) : null,
-                frequency: data.frequency,
-                diaries: new Set(data.diaries)
-            });
+        
+        // ✅ 尝试加载新格式（分离文件）
+        try {
+            await fs.access(metaPath);
+            await fs.access(vectorPath);
+            
+            // 加载元数据
+            const metaContent = await fs.readFile(metaPath, 'utf-8');
+            const metaData = JSON.parse(metaContent);
+            
+            // 加载向量数据
+            const vectorContent = await fs.readFile(vectorPath, 'utf-8');
+            const vectorData = JSON.parse(vectorContent);
+            
+            // 合并数据
+            for (const [tag, meta] of Object.entries(metaData)) {
+                this.globalTags.set(tag, {
+                    vector: meta.hasVector && vectorData[tag] ? new Float32Array(vectorData[tag]) : null,
+                    frequency: meta.frequency,
+                    diaries: new Set(meta.diaries)
+                });
+            }
+            
+            console.log(`[TagVectorManager] Loaded from split files: ${Object.keys(metaData).length} tags, ${Object.keys(vectorData).length} vectors`);
+            
+        } catch (e) {
+            // ✅ 回退到旧格式（单个JSON文件）
+            console.log(`[TagVectorManager] Split files not found, trying legacy format...`);
+            const content = await fs.readFile(dataPath, 'utf-8');
+            const tagData = JSON.parse(content);
+
+            for (const [tag, data] of Object.entries(tagData)) {
+                this.globalTags.set(tag, {
+                    vector: data.vector ? new Float32Array(data.vector) : null,
+                    frequency: data.frequency,
+                    diaries: new Set(data.diaries)
+                });
+            }
+            
+            console.log(`[TagVectorManager] Loaded from legacy file: ${Object.keys(tagData).length} tags`);
         }
 
         const tagsWithVectors = Array.from(this.globalTags.entries())
             .filter(([_, data]) => data.vector !== null);
+
+        if (tagsWithVectors.length === 0) {
+            throw new Error('No vectorized tags found in loaded data');
+        }
 
         const dimensions = tagsWithVectors[0][1].vector.length;
         this.tagIndex = new HierarchicalNSW('l2', dimensions);
