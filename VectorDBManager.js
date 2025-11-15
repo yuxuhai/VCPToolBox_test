@@ -490,26 +490,30 @@ class VectorDBManager {
     }
 
     async scheduleDiaryBookProcessing(diaryName) {
-        // 快速检查
+        // ✅ 修复：统一在入口处管理 activeWorkers
+        // 快速检查（无锁，快速拒绝）
         if (this.activeWorkers.has(diaryName)) {
             console.log(`[VectorDB] Processing for "${diaryName}" is already in progress. Skipping.`);
             return;
         }
 
-        // ✅ 修复：不在这里添加activeWorkers，让具体执行路径自己管理
-        // 使用独立的调度锁，只用于防止并发调度
+        // ✅ 使用独立的调度锁，防止并发调度
         const lockKey = `schedule_${diaryName}`;
         await this.acquireLock(lockKey);
         try {
-            // 双重检查
+            // 双重检查（持有锁后再检查一次）
             if (this.activeWorkers.has(diaryName)) {
                 return;
             }
-            // ✅ 不在这里添加！让 runFullRebuildWorker 或 applyChangeset 自己管理
+            
+            // ✅ 立即标记为活动状态，防止重复调度
+            this.activeWorkers.add(diaryName);
+            console.log(`[VectorDB] Marked "${diaryName}" as active worker`);
         } finally {
             this.releaseLock(lockKey);
         }
 
+        // ✅ 无论后续执行什么路径，都要确保清理 activeWorkers
         try {
             const diaryPath = path.join(DIARY_ROOT_PATH, diaryName);
             
@@ -542,27 +546,40 @@ class VectorDBManager {
      
             if (totalOldChunks === 0 || changeRatio > this.config.changeThreshold) {
                 console.log(`[VectorDB] Major changes detected (${(changeRatio * 100).toFixed(1)}%). Scheduling a full rebuild for "${diaryName}".`);
-                this.runFullRebuildWorker(diaryName);
-                return;
+                // ✅ runFullRebuildWorker 会接管 activeWorkers，所以我们先删除
+                this.activeWorkers.delete(diaryName);
+                const workerStarted = this.runFullRebuildWorker(diaryName);
+                if (!workerStarted) {
+                    // Worker启动失败，不需要清理（已经删除了）
+                    console.log(`[VectorDB] Worker failed to start for "${diaryName}", activeWorker already cleared`);
+                }
+                return; // ✅ Worker会自己管理activeWorkers的清理
             } else if (chunksToAdd.length > 0 || labelsToDelete.length > 0) {
                 console.log(`[VectorDB] Minor changes detected. Applying incremental update for "${diaryName}".`);
-                // ✅ applyChangeset需要自己管理activeWorkers
-                this.activeWorkers.add(diaryName);
-                try {
-                    await this.applyChangeset(changeset);
-                } finally {
-                    this.activeWorkers.delete(diaryName);
-                }
+                // ✅ activeWorkers已经在入口处添加了，直接执行
+                await this.applyChangeset(changeset);
+                // ✅ 成功后在finally块统一清理
             } else {
                 console.log(`[VectorDB] No effective changes detected for "${diaryName}". Nothing to do.`);
+                // ✅ 无操作，在finally块统一清理
             }
         } catch (error) {
             console.error(`[VectorDB] Failed to process diary book "${diaryName}":`, error);
+            // ✅ 错误会在finally块统一清理
+        } finally {
+            // ✅ 统一清理activeWorkers（除非已经转交给Worker）
+            // 如果启动了Worker，activeWorkers已经被删除并转交给Worker管理
+            // 否则，需要在这里清理
+            if (this.activeWorkers.has(diaryName)) {
+                this.activeWorkers.delete(diaryName);
+                console.log(`[VectorDB] Cleared activeWorker for "${diaryName}"`);
+            }
         }
     }
 
     runFullRebuildWorker(diaryName) {
-        // ✅ 防止重复启动 Worker
+        // ✅ 防止重复启动 Worker（双重检查）
+        // 注意：调用者应该已经检查过activeWorkers，但这里再检查一次以防万一
         if (this.activeWorkers.has(diaryName)) {
             console.log(`[VectorDB] Full rebuild worker for "${diaryName}" is already active. Skipping duplicate request.`);
             return false; // ✅ 返回false表示未启动
@@ -570,7 +587,7 @@ class VectorDBManager {
         
         console.log(`[VectorDB] Preparing to start full rebuild worker for "${diaryName}"`);
         
-        // ✅ 先验证配置，验证通过后再标记为活动
+        // ✅ 验证配置
         if (!this.apiKey || !this.apiUrl || !this.embeddingModel) {
             console.error(`[VectorDB] ❌ Missing required config for worker:`);
             console.error(`  API Key: ${this.apiKey ? 'Present' : 'MISSING'}`);
@@ -596,7 +613,7 @@ class VectorDBManager {
             retryAttempts: workerConfig.retryAttempts,
         });
         
-        // ✅ 只有在Worker真正创建后才标记为活动
+        // ✅ 创建Worker（创建成功后立即标记为活动）
         let worker;
         try {
             worker = new Worker(path.resolve(__dirname, 'vectorizationWorker.js'), {
@@ -608,11 +625,13 @@ class VectorDBManager {
             });
             
             // ✅ Worker创建成功，立即标记为活动（防止重复创建）
+            // 这个标记会在Worker的exit事件中清理
             this.activeWorkers.add(diaryName);
             console.log(`[VectorDB] ✅ Worker thread created and marked active for "${diaryName}"`);
         } catch (createError) {
             console.error(`[VectorDB] ❌ Failed to create worker for "${diaryName}":`, createError);
             this.storage.recordFailedRebuild(diaryName, `Worker creation failed: ${createError.message}`);
+            // ✅ 创建失败，不需要清理activeWorkers（因为从未添加）
             return false;
         }
 
@@ -1290,11 +1309,18 @@ class VectorDBManager {
             this.releaseLock(diaryName); // ✅ 先释放锁
         }
         
-        // ✅ 在锁外触发全量重建，避免死锁和重复清理问题
+        // ✅ 在锁外触发全量重建，避免死锁
         if (shouldTriggerFullRebuild) {
             console.log(`[VectorDB] Scheduling full rebuild for "${diaryName}" after failed incremental update.`);
-            this.runFullRebuildWorker(diaryName);
-            // ⚠️ 注意：activeWorkers 的清理由 runFullRebuildWorker 的 exit 事件处理
+            // ✅ 确保activeWorkers已经在调用者那里添加了
+            // runFullRebuildWorker会接管管理
+            const workerStarted = this.runFullRebuildWorker(diaryName);
+            if (!workerStarted) {
+                // Worker启动失败，需要清理activeWorkers
+                this.activeWorkers.delete(diaryName);
+                console.log(`[VectorDB] Worker failed to start, cleared activeWorker for "${diaryName}"`);
+            }
+            // ✅ 如果Worker启动成功，它的exit事件会清理activeWorkers
         }
     }
 
