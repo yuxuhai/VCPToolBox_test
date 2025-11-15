@@ -106,6 +106,12 @@ class VectorDBManager {
         this.searchWorkerPool = new WorkerPool(path.resolve(__dirname, 'vectorSearchWorker.js'));
         this.failedRebuilds = new Map();
         this.fileLocks = new Map(); // ✅ 新增文件锁
+        
+        // ✅ 批量写入优化
+        this.usageStatsBuffer = new Map(); // 内存缓冲区
+        this.usageStatsFlushTimer = null;
+        this.usageStatsFlushDelay = 5000; // 5秒防抖
+        this.isShuttingDown = false; // 关闭标志
 
         this.stats = {
             totalIndices: 0,
@@ -1430,24 +1436,92 @@ class VectorDBManager {
         }
     }
 
-    async trackUsage(diaryName) {
-        // ✅ 使用锁防止并发写入冲突
-        const lockKey = `usage_stats`;
+    /**
+     * ✅ 批量写入优化：记录使用统计到内存缓冲区
+     * 使用防抖机制，减少磁盘写入频率
+     */
+    trackUsage(diaryName) {
+        // 更新内存缓冲区（无需异步操作，性能更好）
+        const current = this.usageStatsBuffer.get(diaryName) || {
+            frequency: 0,
+            lastAccessed: null
+        };
+        current.frequency++;
+        current.lastAccessed = Date.now();
+        this.usageStatsBuffer.set(diaryName, current);
+        
+        // 防抖：重置定时器
+        if (this.usageStatsFlushTimer) {
+            clearTimeout(this.usageStatsFlushTimer);
+        }
+        
+        // 设置新的延迟写入任务
+        this.usageStatsFlushTimer = setTimeout(() => {
+            this.flushUsageStats().catch(e => {
+                console.error('[VectorDB] Failed to flush usage stats:', e);
+            });
+        }, this.usageStatsFlushDelay);
+    }
+    
+    /**
+     * ✅ 将缓冲区数据批量写入磁盘
+     */
+    async flushUsageStats() {
+        // 如果缓冲区为空，无需写入
+        if (this.usageStatsBuffer.size === 0) {
+            this.debugLog('Usage stats buffer is empty, skipping flush');
+            return;
+        }
+        
+        const lockKey = 'usage_stats';
         
         try {
             await this.acquireLock(lockKey);
             
-            let stats = await this.loadUsageStats();
-            if (!stats[diaryName]) {
-                stats[diaryName] = { frequency: 0, lastAccessed: null };
-            }
-            stats[diaryName].frequency++;
-            stats[diaryName].lastAccessed = Date.now();
+            // 复制并清空缓冲区（防止写入期间新数据进入）
+            const bufferSnapshot = new Map(this.usageStatsBuffer);
+            this.usageStatsBuffer.clear();
             
+            // 读取现有统计数据
+            let stats = await this.loadUsageStats();
+            
+            // 合并缓冲区数据
+            for (const [diaryName, data] of bufferSnapshot.entries()) {
+                if (!stats[diaryName]) {
+                    stats[diaryName] = { frequency: 0, lastAccessed: null };
+                }
+                stats[diaryName].frequency += data.frequency;
+                stats[diaryName].lastAccessed = data.lastAccessed;
+            }
+            
+            // 批量写入磁盘
             await this.atomicWriteFile(USAGE_STATS_PATH, JSON.stringify(stats, null, 2));
             
+            this.debugLog(`Flushed ${bufferSnapshot.size} usage stats to disk`);
+            
         } catch (e) {
-            console.warn('[VectorDB] Failed to save usage stats:', e.message);
+            console.error('[VectorDB] Failed to flush usage stats:', e.message);
+            
+            // ✅ 写入失败时，将数据放回缓冲区（避免数据丢失）
+            for (const [diaryName, data] of bufferSnapshot.entries()) {
+                const existing = this.usageStatsBuffer.get(diaryName);
+                if (existing) {
+                    // 合并数据
+                    existing.frequency += data.frequency;
+                    if (data.lastAccessed > existing.lastAccessed) {
+                        existing.lastAccessed = data.lastAccessed;
+                    }
+                } else {
+                    this.usageStatsBuffer.set(diaryName, data);
+                }
+            }
+            
+            // 重试一次
+            if (!this.isShuttingDown) {
+                setTimeout(() => {
+                    this.flushUsageStats().catch(console.error);
+                }, 10000); // 10秒后重试
+            }
         } finally {
             this.releaseLock(lockKey);
         }
@@ -1549,13 +1623,35 @@ class VectorDBManager {
     }
 
     async shutdown() {
-        console.log('[VectorDB] Shutting down worker pool...');
+        console.log('[VectorDB] Shutting down...');
+        this.isShuttingDown = true;
+        
+        // ✅ 取消待处理的flush定时器
+        if (this.usageStatsFlushTimer) {
+            clearTimeout(this.usageStatsFlushTimer);
+            this.usageStatsFlushTimer = null;
+        }
+        
+        // ✅ 立即刷新缓冲区数据（确保数据不丢失）
+        if (this.usageStatsBuffer.size > 0) {
+            console.log('[VectorDB] Flushing usage stats buffer before shutdown...');
+            try {
+                await this.flushUsageStats();
+                console.log('[VectorDB] Usage stats flushed successfully.');
+            } catch (e) {
+                console.error('[VectorDB] Failed to flush usage stats during shutdown:', e);
+            }
+        }
+        
+        // 关闭 worker pool
         if (this.searchWorkerPool && typeof this.searchWorkerPool.terminate === 'function') {
             await this.searchWorkerPool.terminate();
             console.log('[VectorDB] Worker pool shut down successfully.');
         } else {
             console.log('[VectorDB] Worker pool not found or does not have a terminate method.');
         }
+        
+        console.log('[VectorDB] Shutdown complete.');
     }
 }
 
