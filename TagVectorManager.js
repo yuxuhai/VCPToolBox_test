@@ -73,9 +73,11 @@ class TagVectorManager {
         this.saveQueue = [];
         
         // ✅ 批量索引更新优化
-        this.pendingIndexUpdates = new Set(); // 待添加到索引的tag
+        this.pendingIndexUpdates = new Set(); // 当前批次待添加到索引的tag
+        this.nextBatchIndexUpdates = new Set(); // 🌟 下一批次的tag（批处理运行时的新变更）
         this.indexRebuildTimer = null;
-        this.indexRebuildDelay = parseInt(process.env.TAG_INDEX_REBUILD_DELAY) || 5000; // 5秒防抖
+        this.indexRebuildDelay = parseInt(process.env.TAG_INDEX_REBUILD_DELAY) || 60000; // 🌟 改为60秒（1分钟）合并窗口
+        this.isIndexRebuilding = false; // 🌟 批索引是否正在运行
         
         // 🌟 防抖保存配置
         this.saveDebounce = 2000; // 保存防抖时间
@@ -1247,7 +1249,7 @@ class TagVectorManager {
     }
 
     /**
-     * 🌟 后处理：向量化与索引更新 (防抖)
+     * 🌟 后处理：向量化与索引更新 (智能队列分配)
      */
     triggerPostUpdateProcessing(newTagsCandidate) {
         // 找出真正需要向量化的 (没有向量的)
@@ -1257,9 +1259,18 @@ class TagVectorManager {
         });
 
         if (tagsToVectorize.length > 0) {
-            tagsToVectorize.forEach(t => this.pendingIndexUpdates.add(t));
-            // 触发批量索引更新
-            this.scheduleBatchIndexRebuild();
+            // 🌟 关键逻辑：如果批索引正在运行，加入下一批次；否则加入当前批次
+            if (this.isIndexRebuilding) {
+                // 批处理运行中，暂存到下一批
+                tagsToVectorize.forEach(t => this.nextBatchIndexUpdates.add(t));
+                this.debugLog(`Queued ${tagsToVectorize.length} tags to NEXT batch (rebuild in progress)`);
+            } else {
+                // 批处理空闲，加入当前批次
+                tagsToVectorize.forEach(t => this.pendingIndexUpdates.add(t));
+                this.debugLog(`Queued ${tagsToVectorize.length} tags to current batch`);
+                // 触发批量索引更新（带合并窗口）
+                this.scheduleBatchIndexRebuild();
+            }
         }
 
         // 防抖保存
@@ -1417,60 +1428,97 @@ class TagVectorManager {
     }
     
     /**
-     * ✅ 批量索引重建调度器（防抖机制 + 并发保护）
+     * 🌟 批量索引重建调度器（双缓冲队列 + 1分钟合并窗口）
      */
     scheduleBatchIndexRebuild() {
-        // 清除之前的定时器
+        // 如果已经在等待中，不重复设置定时器
         if (this.indexRebuildTimer) {
-            clearTimeout(this.indexRebuildTimer);
+            this.debugLog('Batch rebuild already scheduled, extending merge window...');
+            return;
         }
         
-        // 设置新的定时器：延迟N秒后批量处理
+        // 设置合并窗口：1分钟内的所有变更合并
         this.indexRebuildTimer = setTimeout(async () => {
-            // ✅ 关键修复：检查并发锁 + 初始化状态
-            if (this.updateLock || this.saveLock || !this.initialized) {
-                console.log('[TagVectorManager] ⏳ Operation in progress or not initialized, rescheduling batch update...');
-                this.scheduleBatchIndexRebuild(); // 延迟重试
-                return;
-            }
-            
-            if (this.pendingIndexUpdates.size === 0) return;
-            
-            const tagsToAdd = Array.from(this.pendingIndexUpdates);
-            this.pendingIndexUpdates.clear();
-            this.indexRebuildTimer = null;
-            
-            console.log(`[TagVectorManager] 🔄 Batch updating index with ${tagsToAdd.length} new tags...`);
-            
-            // ✅ 关键修复：获取更新锁，防止与其他操作冲突
-            this.updateLock = true;
-            
-            try {
-                if (!this.tagIndex) {
-                    // 索引不存在，完全重建
-                    await this.buildHNSWIndex();
-                } else {
-                    // ✅ 使用增量添加，避免完全重建
-                    await this.addTagsToIndex(tagsToAdd);
-                }
-                
-                // ✅ 保存到磁盘（通过锁机制保护）
-                const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
-                const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
-                await this.saveGlobalTagLibrary(indexPath, dataPath, true); // 增量模式
-                
-                console.log(`[TagVectorManager] ✅ Batch index update completed`);
-            } catch (error) {
-                console.error('[TagVectorManager] Batch index update failed:', error.message);
-                // ✅ 失败时重新加入队列
-                tagsToAdd.forEach(tag => this.pendingIndexUpdates.add(tag));
-                // 延迟重试
-                setTimeout(() => this.scheduleBatchIndexRebuild(), this.indexRebuildDelay);
-            } finally {
-                // ✅ 确保释放锁
-                this.updateLock = false;
-            }
+            await this.executeBatchIndexRebuild();
         }, this.indexRebuildDelay);
+        
+        console.log(`[TagVectorManager] ⏰ Batch rebuild scheduled (merge window: ${this.indexRebuildDelay/1000}s, pending: ${this.pendingIndexUpdates.size} tags)`);
+    }
+
+    /**
+     * 🌟 执行批量索引重建（信号枪机制）
+     */
+    async executeBatchIndexRebuild() {
+        this.indexRebuildTimer = null;
+        
+        // 检查前置条件
+        if (this.updateLock || this.saveLock || !this.initialized) {
+            console.log('[TagVectorManager] ⏳ Operation in progress, rescheduling...');
+            setTimeout(() => this.executeBatchIndexRebuild(), 5000);
+            return;
+        }
+        
+        if (this.pendingIndexUpdates.size === 0) {
+            this.debugLog('No tags to rebuild, skipping');
+            return;
+        }
+        
+        // 🌟 关键：启动批处理前，切换到"正在运行"状态
+        this.isIndexRebuilding = true;
+        
+        const tagsToAdd = Array.from(this.pendingIndexUpdates);
+        this.pendingIndexUpdates.clear();
+        
+        console.log(`[TagVectorManager] 🚀 Starting batch rebuild: ${tagsToAdd.length} tags`);
+        console.log(`[TagVectorManager] 📋 Next batch queue size: ${this.nextBatchIndexUpdates.size} tags`);
+        
+        // 获取更新锁
+        this.updateLock = true;
+        
+        try {
+            // 1. 向量化
+            console.log(`[TagVectorManager] 🔢 Vectorizing ${tagsToAdd.length} tags...`);
+            await this.vectorizeTagBatch(tagsToAdd);
+            
+            // 2. 更新索引
+            if (!this.tagIndex) {
+                await this.buildHNSWIndex();
+            } else {
+                await this.addTagsToIndex(tagsToAdd);
+            }
+            
+            // 3. 保存到磁盘
+            const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
+            const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
+            console.log(`[TagVectorManager] 💾 Saving batch changes...`);
+            await this.saveGlobalTagLibrary(indexPath, dataPath, true);
+            
+            console.log(`[TagVectorManager] ✅ Batch rebuild completed successfully`);
+            
+        } catch (error) {
+            console.error('[TagVectorManager] ❌ Batch rebuild failed:', error.message);
+            // 失败时，将tag放回下一批次
+            tagsToAdd.forEach(tag => this.nextBatchIndexUpdates.add(tag));
+            
+        } finally {
+            // 🌟 关键：批处理完成，切换状态
+            this.isIndexRebuilding = false;
+            this.updateLock = false;
+            
+            // 🌟 检查下一批次队列
+            if (this.nextBatchIndexUpdates.size > 0) {
+                console.log(`[TagVectorManager] 🔄 Activating next batch: ${this.nextBatchIndexUpdates.size} tags`);
+                
+                // 将下一批次移动到当前批次
+                this.nextBatchIndexUpdates.forEach(tag => this.pendingIndexUpdates.add(tag));
+                this.nextBatchIndexUpdates.clear();
+                
+                // 立即启动下一轮（不等待合并窗口）
+                setTimeout(() => this.executeBatchIndexRebuild(), 1000);
+            } else {
+                console.log(`[TagVectorManager] ✨ All batches completed, system idle`);
+            }
+        }
     }
 
     /**
