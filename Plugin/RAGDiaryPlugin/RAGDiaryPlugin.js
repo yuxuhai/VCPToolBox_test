@@ -1001,6 +1001,7 @@ class RAGDiaryPlugin {
                             aiMemoRequests.push({ placeholder, dbName });
                             return { placeholder, content: '' }; // 暂时返回空，稍后统一处理
                         } else {
+                            // ✅ 混合模式也传递TagMemo参数
                             const retrievedContent = await this._processRAGPlaceholder({
                                 dbName, modifiers, queryVector, userContent, combinedQueryForDisplay,
                                 dynamicK, timeRanges, allowTimeAndGroup: true
@@ -1098,6 +1099,14 @@ class RAGDiaryPlugin {
         const useTime = allowTimeAndGroup && modifiers.includes('::Time');
         const useGroup = allowTimeAndGroup && modifiers.includes('::Group');
         const useRerank = modifiers.includes('::Rerank');
+        
+        // ✅ 新增：解析TagMemo修饰符和权重
+        const tagMemoMatch = modifiers.match(/::TagMemo([\d.]+)/);
+        const tagWeight = tagMemoMatch ? parseFloat(tagMemoMatch[1]) : null;
+        
+        if (tagWeight !== null) {
+            console.log(`[RAGDiaryPlugin] 检测到TagMemo修饰符，权重=${tagWeight}`);
+        }
 
         const displayName = dbName + '日记本';
         const finalK = Math.max(1, Math.round(dynamicK * kMultiplier));
@@ -1120,7 +1129,8 @@ class RAGDiaryPlugin {
 
         if (useTime && timeRanges && timeRanges.length > 0) {
             // --- Time-aware path ---
-            let ragResults = await this.vectorDBManager.search(dbName, finalQueryVector, kForSearch);
+            // ✅ Time模式下也传递tagWeight
+            let ragResults = await this.vectorDBManager.search(dbName, finalQueryVector, kForSearch, tagWeight);
 
             if (useRerank) {
                 ragResults = await this._rerankDocuments(userContent, ragResults, finalK);
@@ -1147,7 +1157,8 @@ class RAGDiaryPlugin {
 
         } else {
             // --- Standard path (no time filter) ---
-            let searchResults = await this.vectorDBManager.search(dbName, finalQueryVector, kForSearch);
+            // ✅ 传递tagWeight参数到search方法
+            let searchResults = await this.vectorDBManager.search(dbName, finalQueryVector, kForSearch, tagWeight);
             
             if (useRerank) {
                 searchResults = await this._rerankDocuments(userContent, searchResults, finalK);
@@ -1173,6 +1184,8 @@ class RAGDiaryPlugin {
                     useTime: useTime,
                     useGroup: useGroup,
                     useRerank: useRerank,
+                    useTagMemo: tagWeight !== null, // ✅ 添加Tag模式标识
+                    tagWeight: tagWeight, // ✅ 添加Tag权重
                     timeRanges: useTime ? timeRanges.map(r => ({ start: r.start.toISOString(), end: r.end.toISOString() })) : undefined,
                     results: cleanedResults
                 };

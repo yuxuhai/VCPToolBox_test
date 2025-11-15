@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const { chunkText } = require('./TextChunker.js');
 const WorkerPool = require('./WorkerPool.js');
 const VectorDBStorage = require('./VectorDBStorage.js');
+const TagVectorManager = require('./TagVectorManager.js');
 
 // --- Constants ---
 const DIARY_ROOT_PATH = path.join(__dirname, 'dailynote'); // Your diary root directory
@@ -106,6 +107,10 @@ class VectorDBManager {
         // ✅ SQLite存储层
         this.storage = new VectorDBStorage(VECTOR_STORE_PATH);
         
+        // ✅ Tag向量管理器
+        this.tagVectorManager = null;
+        this.tagVectorEnabled = false;
+        
         // ✅ 批量写入优化
         this.usageStatsBuffer = new Map();
         this.usageStatsFlushTimer = null;
@@ -196,7 +201,7 @@ class VectorDBManager {
 
     getHealthStatus() {
         const totalChunks = Array.from(this.chunkMaps.values()).reduce((sum, map) => sum + Object.keys(map).length, 0);
-        return {
+        const healthStatus = {
             status: 'healthy',
             stats: {
                 ...this.stats,
@@ -210,17 +215,71 @@ class VectorDBManager {
             dbStats: this.storage.getStats(),
             cacheStats: this.searchCache.getStats(),
         };
+        
+        // ✅ 添加Tag向量统计
+        if (this.tagVectorEnabled && this.tagVectorManager) {
+            healthStatus.tagStats = this.tagVectorManager.getStats();
+        }
+        
+        return healthStatus;
     }
 
     async initialize() {
         console.log('[VectorDB] Initializing Vector Database Manager...');
         await fs.mkdir(VECTOR_STORE_PATH, { recursive: true });
         await this.storage.initialize();
+        
+        // ✅ 初始化Tag向量管理器（异步后台，不阻塞启动）
+        this.initializeTagVectorManager(); // ⚠️ 不使用 await，让它在后台运行
+        
         await this.scanAndSyncAll();
         await this.cacheDiaryNameVectors();
         await this.preWarmIndices();
         this.watchDiaries();
         console.log('[VectorDB] Initialization complete. Now monitoring diary files for changes.');
+    }
+
+    /**
+     * ✅ 初始化Tag向量管理器（异步后台构建）
+     */
+    async initializeTagVectorManager() {
+        try {
+            console.log('[VectorDB] Initializing Tag Vector Manager...');
+            
+            this.tagVectorManager = new TagVectorManager({
+                diaryRootPath: DIARY_ROOT_PATH,
+                vectorStorePath: VECTOR_STORE_PATH
+            });
+            
+            // 传入embedding函数
+            const embeddingFunction = async (texts) => {
+                return await this.getEmbeddingsWithRetry(texts);
+            };
+            
+            // ✅ 异步初始化：不阻塞服务器启动
+            console.log('[VectorDB] Tag Vector Manager will build in background...');
+            this.tagVectorManager.initialize(embeddingFunction).then(() => {
+                this.tagVectorEnabled = true;
+                const stats = this.tagVectorManager.getStats();
+                console.log(`[VectorDB] ✅ Tag Vector Manager ready:`, {
+                    totalTags: stats.totalTags,
+                    vectorizedTags: stats.vectorizedTags,
+                    blacklistedTags: stats.blacklistedTags
+                });
+                console.log('[VectorDB] 🎉 Tag-based search is now available!');
+            }).catch(error => {
+                console.error('[VectorDB] Tag Vector Manager build failed:', error);
+                this.tagVectorEnabled = false;
+            });
+            
+            // 立即返回，不等待构建完成
+            console.log('[VectorDB] Tag Vector Manager is building in background, server continues...');
+            
+        } catch (error) {
+            console.error('[VectorDB] Failed to start Tag Vector Manager:', error);
+            console.warn('[VectorDB] Tag-based search will be disabled');
+            this.tagVectorEnabled = false;
+        }
     }
 
 
@@ -1371,7 +1430,21 @@ class VectorDBManager {
         }
     }
 
-    async search(diaryName, queryVector, k = 3) {
+    /**
+     * 统一搜索入口
+     * @param {string} diaryName - 日记本名称
+     * @param {Array} queryVector - 查询向量
+     * @param {number} k - 返回结果数量
+     * @param {number|null} tagWeight - Tag权重 (0-1之间)，null表示不启用Tag检索
+     * @returns {Array} - 搜索结果
+     */
+    async search(diaryName, queryVector, k = 3, tagWeight = null) {
+        // ✅ 如果传入了tagWeight参数，使用Tag增强搜索
+        if (tagWeight !== null && tagWeight !== undefined) {
+            return await this.searchWithTagBoost(diaryName, queryVector, k, tagWeight);
+        }
+
+        // 否则使用普通向量搜索
         const startTime = performance.now();
         const cached = this.searchCache.get(diaryName, queryVector, k);
         if (cached) {
@@ -1433,6 +1506,109 @@ class VectorDBManager {
         } catch (error) {
             console.error(`[VectorDB][Search] Worker pool task for "${diaryName}" encountered a critical error:`, error);
             return [];
+        }
+    }
+
+    /**
+     * 🌟 带Tag权重的搜索方法（向量融合版 - 不依赖chunk的tag标记）
+     * @param {string} diaryName - 日记本名称
+     * @param {Array} queryVector - 查询向量
+     * @param {number} k - 返回结果数量
+     * @param {number} tagWeight - Tag权重/alpha (0-1之间，默认0.65)
+     * @returns {Array} - 搜索结果
+     */
+    async searchWithTagBoost(diaryName, queryVector, k = 3, tagWeight = 0.65) {
+        const startTime = performance.now();
+        
+        // 如果Tag功能未启用，回退到普通搜索
+        if (!this.tagVectorEnabled || !this.tagVectorManager) {
+            console.log(`[VectorDB][TagSearch] Tag search disabled, fallback to normal search`);
+            return await this.search(diaryName, queryVector, k);
+        }
+
+        console.log(`[VectorDB][TagSearch] Starting Tag-enhanced vector search for "${diaryName}" (α=${tagWeight})`);
+
+        try {
+            // Step 1: Tag层 - 获取语义相关的tags及其向量
+            const topTagCount = Math.max(10, k * 2);
+            const matchedTags = await this.tagVectorManager.searchSimilarTags(queryVector, topTagCount);
+            
+            if (matchedTags.length === 0) {
+                console.log(`[VectorDB][TagSearch] No matched tags, fallback to normal search`);
+                return await this.search(diaryName, queryVector, k);
+            }
+
+            console.log(`[VectorDB][TagSearch] Matched ${matchedTags.length} tags:`,
+                matchedTags.slice(0, 5).map(t => `${t.tag}(${t.score.toFixed(3)})`).join(', '));
+
+            // Step 2: 向量融合 - 构建Tag增强的查询向量
+            // 收集匹配tags的向量（加权平均）
+            const tagVectors = [];
+            const tagWeights = [];
+            
+            for (const tagInfo of matchedTags) {
+                const tagData = this.tagVectorManager.globalTags.get(tagInfo.tag);
+                if (tagData && tagData.vector) {
+                    tagVectors.push(tagData.vector);
+                    tagWeights.push(tagInfo.score); // 使用相似度作为权重
+                }
+            }
+
+            if (tagVectors.length === 0) {
+                console.warn(`[VectorDB][TagSearch] No tag vectors available, fallback`);
+                return await this.search(diaryName, queryVector, k);
+            }
+
+            // 计算tag向量的加权平均
+            const dimensions = queryVector.length;
+            const avgTagVector = new Array(dimensions).fill(0);
+            let totalWeight = 0;
+
+            for (let i = 0; i < tagVectors.length; i++) {
+                const weight = tagWeights[i];
+                totalWeight += weight;
+                for (let j = 0; j < dimensions; j++) {
+                    avgTagVector[j] += tagVectors[i][j] * weight;
+                }
+            }
+
+            // 归一化
+            if (totalWeight > 0) {
+                for (let j = 0; j < dimensions; j++) {
+                    avgTagVector[j] /= totalWeight;
+                }
+            }
+
+            // 🌟 核心融合公式：enhancedQuery = (1-α)×query + α×tagAvg
+            const enhancedQueryVector = new Array(dimensions);
+            for (let i = 0; i < dimensions; i++) {
+                enhancedQueryVector[i] = (1 - tagWeight) * queryVector[i] + tagWeight * avgTagVector[i];
+            }
+
+            console.log(`[VectorDB][TagSearch] Query vector enhanced with ${tagVectors.length} tag vectors (α=${tagWeight})`);
+
+            // Step 3: 使用增强后的向量搜索
+            const searchResults = await this.search(diaryName, enhancedQueryVector, k);
+
+            console.log(`[VectorDB][TagSearch] Tag-enhanced search completed in ${(performance.now() - startTime).toFixed(2)}ms`);
+            console.log(`[VectorDB][TagSearch] Found ${searchResults.length} results with tag semantic boost`);
+
+            // 在结果中附加tag信息（用于调试和VCP Info）
+            const enhancedResults = searchResults.map(result => ({
+                ...result,
+                tagEnhanced: true,
+                tagWeight: tagWeight,
+                matchedTagCount: matchedTags.length,
+                topTags: matchedTags.slice(0, 5).map(t => t.tag)
+            }));
+
+            this.recordMetric('search_success', performance.now() - startTime);
+            return enhancedResults;
+
+        } catch (error) {
+            console.error(`[VectorDB][TagSearch] Tag-enhanced search failed:`, error);
+            console.log(`[VectorDB][TagSearch] Fallback to normal search`);
+            return await this.search(diaryName, queryVector, k);
         }
     }
 
