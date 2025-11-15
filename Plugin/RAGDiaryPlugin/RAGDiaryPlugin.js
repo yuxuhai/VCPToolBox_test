@@ -1187,7 +1187,9 @@ class RAGDiaryPlugin {
                     useTagMemo: tagWeight !== null, // ✅ 添加Tag模式标识
                     tagWeight: tagWeight, // ✅ 添加Tag权重
                     timeRanges: useTime ? timeRanges.map(r => ({ start: r.start.toISOString(), end: r.end.toISOString() })) : undefined,
-                    results: cleanedResults
+                    results: cleanedResults,
+                    // ✅ 新增：汇总Tag统计信息
+                    tagStats: tagWeight !== null ? this._aggregateTagStats(cleanedResults) : undefined
                 };
                 this.pushVcpInfo(infoData);
             } catch (broadcastError) {
@@ -1669,14 +1671,46 @@ class RAGDiaryPlugin {
         if (!Array.isArray(results)) return [];
         return results.map(r => {
             // 仅保留可序列化的关键属性
-            return {
+            const cleaned = {
                 text: r.text || '',
                 score: r.score || undefined,
                 source: r.source || undefined,
                 date: r.date || undefined,
-                // 移除所有可能导致 JSON.stringify 失败的复杂对象或循环引用
             };
+            
+            // ✅ 新增：包含Tag相关信息（如果存在）
+            if (r.originalScore !== undefined) cleaned.originalScore = r.originalScore;
+            if (r.tagMatchScore !== undefined) cleaned.tagMatchScore = r.tagMatchScore;
+            if (r.matchedTags && Array.isArray(r.matchedTags)) cleaned.matchedTags = r.matchedTags;
+            if (r.tagMatchCount !== undefined) cleaned.tagMatchCount = r.tagMatchCount;
+            if (r.boostFactor !== undefined) cleaned.boostFactor = r.boostFactor;
+            
+            return cleaned;
         });
+    }
+    
+    /**
+     * ✅ 新增：汇总Tag统计信息
+     */
+    _aggregateTagStats(results) {
+        const allMatchedTags = new Set();
+        let totalBoostFactor = 0;
+        let resultsWithTags = 0;
+        
+        for (const r of results) {
+            if (r.matchedTags && r.matchedTags.length > 0) {
+                r.matchedTags.forEach(tag => allMatchedTags.add(tag));
+                resultsWithTags++;
+                if (r.boostFactor) totalBoostFactor += r.boostFactor;
+            }
+        }
+        
+        return {
+            uniqueMatchedTags: Array.from(allMatchedTags),
+            totalTagMatches: allMatchedTags.size,
+            resultsWithTags: resultsWithTags,
+            avgBoostFactor: resultsWithTags > 0 ? (totalBoostFactor / resultsWithTags).toFixed(3) : 1.0
+        };
     }
 
     async getSingleEmbedding(text) {
