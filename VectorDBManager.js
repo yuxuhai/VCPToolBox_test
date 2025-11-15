@@ -1615,14 +1615,29 @@ class VectorDBManager {
             console.log(`[VectorDB][TagSearch] Tag-enhanced search completed in ${(performance.now() - startTime).toFixed(2)}ms`);
             console.log(`[VectorDB][TagSearch] Found ${searchResults.length} results with tag semantic boost`);
 
-            // 在结果中附加tag信息（用于调试和VCP Info）
-            const enhancedResults = searchResults.map(result => ({
-                ...result,
-                tagEnhanced: true,
-                tagWeight: tagWeight,
-                matchedTagCount: matchedTags.length,
-                topTags: matchedTags.slice(0, 5).map(t => t.tag)
-            }));
+            // ✅ 在结果中附加tag信息（用于VCP Info广播）
+            const enhancedResults = searchResults.map(result => {
+                // 计算Tag匹配分数（归一化的平均相似度）
+                const avgTagScore = matchedTags.length > 0
+                    ? matchedTags.reduce((sum, t) => sum + t.score, 0) / matchedTags.length
+                    : 0;
+                
+                // 计算提权倍数：基于Tag权重和匹配数量
+                const boostFactor = 1 + (tagWeight * avgTagScore * Math.min(matchedTags.length, 5) / 5);
+                
+                return {
+                    ...result,
+                    // ✅ 保留原始得分（如果存在）
+                    originalScore: result.score,
+                    // ✅ Tag增强后的得分
+                    score: result.score * boostFactor,
+                    // ✅ Tag匹配信息
+                    tagMatchScore: avgTagScore,
+                    matchedTags: matchedTags.slice(0, 10).map(t => t.tag), // 取前10个最相关的tag
+                    tagMatchCount: matchedTags.length,
+                    boostFactor: boostFactor
+                };
+            });
 
             this.recordMetric('search_success', performance.now() - startTime);
             return enhancedResults;
