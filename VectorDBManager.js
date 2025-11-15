@@ -1851,9 +1851,22 @@ class VectorDBManager {
             console.log('[VectorDB] No usage stats found, skipping pre-warming.');
             return;
         }
+        
+        // ✅ 修复：只探测一次dimensions，避免重复向量化
+        let sharedDimensions = null;
+        try {
+            const dummyEmbeddings = await this.getEmbeddingsWithRetry(["."]);
+            if (dummyEmbeddings && dummyEmbeddings.length > 0) {
+                sharedDimensions = dummyEmbeddings[0].length;
+                console.log(`[VectorDB] Detected embedding dimensions: ${sharedDimensions} (single probe for all indices)`);
+            }
+        } catch (error) {
+            console.warn(`[VectorDB] Failed to detect dimensions:`, error.message);
+        }
+        
         const preLoadPromises = sortedDiaries
             .slice(0, preLoadCount)
-            .map(diaryName => this.loadIndexForSearch(diaryName));
+            .map(diaryName => this.loadIndexForSearch(diaryName, sharedDimensions));
         
         await Promise.all(preLoadPromises);
         console.log(`[VectorDB] Pre-warmed ${preLoadCount} most frequently used indices.`);

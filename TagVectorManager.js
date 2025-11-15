@@ -469,55 +469,69 @@ class TagVectorManager {
     async incrementalUpdate() {
         console.log('[TagVectorManager] Starting incremental update...');
         
-        // Step 1: 扫描当前所有Tags
+        // Step 1: 保存旧的tags（已向量化的）
+        const oldTags = new Set(this.globalTags.keys());
+        const oldVectorizedTags = new Set(
+            Array.from(this.globalTags.entries())
+                .filter(([_, data]) => data.vector !== null)
+                .map(([tag, _]) => tag)
+        );
+        
+        // Step 2: 重新扫描所有Tags
         const currentStats = await this.scanAllDiaryTags();
-        const currentTags = new Set(this.globalTags.keys());
+        console.log(`[TagVectorManager] Scanned ${currentStats.totalFiles} files, found ${currentStats.uniqueTags} unique tags`);
         
-        // Step 2: 应用过滤规则（包括黑名单）
+        // Step 3: 应用过滤规则（包括黑名单）
         this.applyTagFilters(currentStats);
-        const filteredCurrentTags = new Set(this.globalTags.keys());
+        const newTags = new Set(this.globalTags.keys());
+        console.log(`[TagVectorManager] After filtering: ${newTags.size} tags`);
         
-        // Step 3: 检测变化
+        // Step 4: 检测变化
         const tagsToAdd = [];
         const tagsToRemove = [];
         
-        // 检测新增的Tags
-        for (const tag of filteredCurrentTags) {
-            if (!currentTags.has(tag)) {
+        // 检测新增的Tags（在新扫描中出现，但在旧tags中不存在）
+        for (const tag of newTags) {
+            if (!oldTags.has(tag)) {
+                tagsToAdd.push(tag);
+            } else if (!oldVectorizedTags.has(tag)) {
+                // 旧tag存在但未向量化，也需要向量化
                 tagsToAdd.push(tag);
             }
         }
         
-        // 检测需要删除的Tags（文件删除或被黑名单过滤）
-        for (const tag of currentTags) {
-            if (!filteredCurrentTags.has(tag)) {
+        // 检测需要删除的Tags（在旧tags中存在，但新扫描中不存在）
+        for (const tag of oldTags) {
+            if (!newTags.has(tag)) {
                 tagsToRemove.push(tag);
             }
         }
         
         if (tagsToAdd.length === 0 && tagsToRemove.length === 0) {
+            console.log('[TagVectorManager] No changes detected');
             return false;
         }
         
         console.log(`[TagVectorManager] Changes detected:`);
-        console.log(`  - Tags to add: ${tagsToAdd.length}`);
+        console.log(`  - Tags to add/vectorize: ${tagsToAdd.length}`);
         console.log(`  - Tags to remove: ${tagsToRemove.length}`);
         
-        // Step 4: 删除过期Tags
+        // Step 5: 删除过期Tags
         for (const tag of tagsToRemove) {
             this.globalTags.delete(tag);
             this.debugLog(`Removed tag: "${tag}"`);
         }
         
-        // Step 5: 向量化新增Tags
+        // Step 6: 向量化新增Tags
         if (tagsToAdd.length > 0) {
             console.log(`[TagVectorManager] Vectorizing ${tagsToAdd.length} new tags...`);
             await this.vectorizeTagBatch(tagsToAdd);
         }
         
-        // Step 6: 重建索引
+        // Step 7: 重建索引
         if (this.globalTags.size > 0) {
-            console.log('[TagVectorManager] Rebuilding HNSW index...');
+            const vectorizedCount = Array.from(this.globalTags.values()).filter(d => d.vector !== null).length;
+            console.log(`[TagVectorManager] Rebuilding HNSW index with ${vectorizedCount} vectorized tags...`);
             this.buildHNSWIndex();
         }
         
