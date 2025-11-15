@@ -868,6 +868,7 @@ async function initialize() {
     console.log('向量数据库初始化完成。');
 
     pluginManager.setProjectBasePath(__dirname);
+    pluginManager.setVectorDBManager(vectorDBManager); // 修复：注入 vectorDBManager，避免重复创建
     
     console.log('开始加载插件...');
     await pluginManager.loadPlugins();

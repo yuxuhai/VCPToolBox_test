@@ -28,12 +28,17 @@ class PluginManager {
         this.webSocketServer = null; // 为 WebSocketServer 实例占位
         this.isReloading = false;
         this.reloadTimeout = null;
-        this.vectorDBManager = new VectorDBManager();
+        this.vectorDBManager = null; // 修复：不再自己创建，等待注入
     }
 
     setWebSocketServer(wss) {
         this.webSocketServer = wss;
         if (this.debugMode) console.log('[PluginManager] WebSocketServer instance has been set.');
+    }
+
+    setVectorDBManager(vdbManager) {
+        this.vectorDBManager = vdbManager;
+        if (this.debugMode) console.log('[PluginManager] VectorDBManager instance has been set.');
     }
 
     async _getDecryptedAuthCode() {
@@ -472,9 +477,9 @@ class PluginManager {
             this.preprocessorOrder = finalOrder;
             if (finalOrder.length > 0) console.log('[PluginManager] Final message preprocessor order: ' + finalOrder.join(' -> '));
 
-            // 5. 初始化共享服务 (VectorDBManager)
-            if (this.vectorDBManager) {
-                await this.vectorDBManager.initialize();
+            // 5. VectorDBManager 应该已经由 server.js 初始化，这里不再重复初始化
+            if (!this.vectorDBManager) {
+                console.warn('[PluginManager] VectorDBManager not set! Plugins requiring it may fail.');
             }
 
             // 6. 按顺序初始化所有模块
