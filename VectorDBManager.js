@@ -2210,15 +2210,48 @@ async function processSingleDiaryBookInWorker(diaryName, config) {
             if (!index) {
                 dimensions = fileVectors[0].length;
                 index = new HierarchicalNSW('l2', dimensions);
-                // 预估总容量（当前进度 + 剩余文件 * 平均chunk数）
-                const estimatedTotal = Object.keys(chunkMap).length + (relevantFiles.length - processedFiles.size) * 10;
-                index.initIndex(Math.max(estimatedTotal, 1000));
-                console.log(`[VectorDB][Worker] Created new index with estimated capacity: ${estimatedTotal}`);
+                // ✅ 修复：智能容量预估，支持大规模专业论文集
+                const processedChunkCount = Object.keys(chunkMap).length;
+                const processedFileCount = processedFiles.size;
+                const remainingFiles = relevantFiles.length - processedFiles.size;
+                
+                let estimatedTotal;
+                
+                if (processedFileCount > 0) {
+                    // 基于已处理文件动态计算平均值
+                    const avgChunksPerFile = Math.ceil(processedChunkCount / processedFileCount);
+                    estimatedTotal = processedChunkCount + (remainingFiles * avgChunksPerFile);
+                    console.log(`[VectorDB][Worker] Capacity estimation based on ${processedFileCount} processed files (avg: ${avgChunksPerFile} chunks/file)`);
+                } else {
+                    // 首次创建：基于总文件数做保守估计
+                    // 假设每个文件至少200个chunks（适配大型论文集）
+                    const conservativeEstimate = relevantFiles.length * 200;
+                    estimatedTotal = Math.max(conservativeEstimate, 5000);
+                    console.log(`[VectorDB][Worker] Initial capacity estimation for ${relevantFiles.length} files: ${estimatedTotal} chunks`);
+                }
+                
+                // ✅ 关键：为大规模数据集增加50%缓冲（而非20%）
+                const capacityWithBuffer = Math.ceil(estimatedTotal * 1.5);
+                const finalCapacity = Math.max(capacityWithBuffer, 10000); // 最小容量提升到10000
+                
+                index.initIndex(finalCapacity);
+                console.log(`[VectorDB][Worker] ✅ Index initialized with capacity: ${finalCapacity.toLocaleString()} (estimated: ${estimatedTotal.toLocaleString()})`);
             }
             
-            // ✅ 添加这个文件的所有向量到索引
+            // ✅ 添加这个文件的所有向量到索引（带容量检查）
             for (let i = 0; i < fileVectors.length; i++) {
                 const currentLabel = labelCounter++;
+                
+                // ✅ 关键修复：添加前检查容量，必要时扩容
+                const currentCount = Object.keys(chunkMap).length + 1;
+                const currentCapacity = index.getMaxElements();
+                
+                if (currentCount > currentCapacity) {
+                    const newCapacity = Math.ceil(currentCapacity * 1.5);
+                    console.log(`[VectorDB][Worker] ⚠️ Capacity exceeded! Resizing from ${currentCapacity} to ${newCapacity}`);
+                    index.resizeIndex(newCapacity);
+                }
+                
                 index.addPoint(fileVectors[i], currentLabel);
                 chunkMap[currentLabel] = {
                     text: fileChunks[i].chunk,
