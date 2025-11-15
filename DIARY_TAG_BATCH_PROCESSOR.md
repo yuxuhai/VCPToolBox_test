@@ -45,7 +45,7 @@
 
 ## 安装要求
 
-### 依赖项
+### 方式1：在VCP项目中使用（推荐）
 
 工具使用VCP主项目的依赖，确保已安装：
 
@@ -53,9 +53,82 @@
 npm install
 ```
 
-主要依赖：
-- `dotenv` - 环境变量加载
-- `node-fetch` - HTTP请求
+### 方式2：独立部署使用
+
+如果想在其他项目或单独使用，可以创建独立部署：
+
+#### 步骤1：复制文件
+
+将以下文件复制到新目录：
+
+```
+your-diary-tool/
+├── diary-tag-batch-processor.js    # 主程序
+├── package.json                     # 依赖配置（见下文）
+├── config.env                       # API配置
+├── TagMaster.txt                    # Tag生成提示词
+└── Plugin/                          # 可选，仅用于引用TagMaster.txt
+    └── DailyNoteWrite/
+        └── TagMaster.txt
+```
+
+#### 步骤2：创建package.json
+
+```json
+{
+  "name": "vcp-diary-tag-processor",
+  "version": "1.0.0",
+  "description": "VCP日记批量Tag处理工具",
+  "main": "diary-tag-batch-processor.js",
+  "scripts": {
+    "start": "node diary-tag-batch-processor.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
+```
+
+或直接使用根目录的 [`diary-tag-processor-package.json`](diary-tag-processor-package.json:1)：
+
+```bash
+cp diary-tag-processor-package.json your-diary-tool/package.json
+```
+
+#### 步骤3：安装依赖
+
+```bash
+cd your-diary-tool
+npm install
+```
+
+#### 步骤4：配置
+
+创建 `config.env`（参考 [`tag-processor-config.env.example`](tag-processor-config.env.example:1)）：
+
+```env
+API_Key=your_api_key_here
+API_URL=https://api.openai.com
+TagModel=claude-sonnet-4-20250514
+TagModelMaxTokens=40000
+TagModelMaxOutPutTokens=30000
+TagModelPrompt=TagMaster.txt
+```
+
+#### 步骤5：运行
+
+```bash
+node diary-tag-batch-processor.js /path/to/your/diaries
+```
+
+### 主要依赖
+
+- `dotenv` (^16.4.5) - 环境变量加载
+- `node-fetch` (^3.3.2) - HTTP请求（ESM动态导入）
 
 ### 配置文件
 

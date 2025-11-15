@@ -20,9 +20,8 @@ const fs = require('fs').promises;
 const path = require('path');
 const { existsSync } = require('fs');
 
-// 加载环境变量
+// 加载环境变量（独立应用配置）
 require('dotenv').config({ path: path.join(__dirname, 'config.env') });
-require('dotenv').config({ path: path.join(__dirname, 'Plugin', 'DailyNoteWrite', 'config.env') });
 
 // --- 配置 ---
 const TAG_MODEL = process.env.TagModel || 'gemini-2.5-flash-preview-09-2025-thinking';
@@ -169,8 +168,8 @@ async function generateTagsWithAI(content, maxRetries = 3) {
         return null;
     }
     
-    // 读取TagMaster提示词
-    const promptFilePath = path.join(__dirname, 'Plugin', 'DailyNoteWrite', TAG_MODEL_PROMPT_FILE);
+    // 读取TagMaster提示词（独立应用根目录）
+    const promptFilePath = path.join(__dirname, TAG_MODEL_PROMPT_FILE);
     let systemPrompt;
     try {
         systemPrompt = await fs.readFile(promptFilePath, 'utf-8');
@@ -189,11 +188,20 @@ async function generateTagsWithAI(content, maxRetries = 3) {
         temperature: 0.7
     };
     
+    // 构造完整的API URL（如果API_URL已包含完整路径则直接使用）
+    const apiEndpoint = API_URL.includes('/chat/completions')
+        ? API_URL
+        : `${API_URL}/v1/chat/completions`;
+    
     // 带退避重试的API调用
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const fetch = (await import('node-fetch')).default;
-            const response = await fetch(`${API_URL}/v1/chat/completions`, {
+            
+            log(`API Request (attempt ${attempt}): ${apiEndpoint}`);
+            log(`Using model: ${TAG_MODEL}`);
+            
+            const response = await fetch(apiEndpoint, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -203,9 +211,28 @@ async function generateTagsWithAI(content, maxRetries = 3) {
                 timeout: 60000
             });
             
-            // 需要重试的错误码
+            // 429 限流错误 - 需要更长的等待时间
+            if (response.status === 429) {
+                const retryAfter = response.headers.get('retry-after');
+                const waitTime = retryAfter
+                    ? parseInt(retryAfter) * 1000
+                    : Math.pow(2, attempt) * 5000; // 5秒、10秒、20秒...
+                
+                error(`API rate limit (429) reached (attempt ${attempt}/${maxRetries})`);
+                
+                if (attempt < maxRetries) {
+                    log(`⏳ Waiting ${Math.round(waitTime/1000)}s before retry...`);
+                    await delay(waitTime);
+                    continue;
+                } else {
+                    error('Max retries reached for rate limit. Stopping.');
+                    return null;
+                }
+            }
+            
+            // 服务器错误 - 需要重试
             if (response.status === 500 || response.status === 503) {
-                error(`API returned ${response.status} (attempt ${attempt}/${maxRetries})`);
+                error(`API server error ${response.status} (attempt ${attempt}/${maxRetries})`);
                 
                 if (attempt < maxRetries) {
                     const backoffTime = Math.pow(2, attempt - 1) * 1000;
@@ -217,7 +244,21 @@ async function generateTagsWithAI(content, maxRetries = 3) {
             }
             
             if (!response.ok) {
-                error('API error:', response.status);
+                let errorText = '';
+                try {
+                    errorText = await response.text();
+                } catch (e) {
+                    errorText = 'Unable to read error response';
+                }
+                
+                error(`API error (${response.status}): ${errorText}`);
+                
+                // 认证错误 - 不重试，直接失败
+                if (response.status === 401 || response.status === 403) {
+                    error('❌ Authentication failed. Please check your API_Key and API_URL in config.env');
+                    return null;
+                }
+                
                 return null;
             }
             
@@ -386,12 +427,19 @@ async function main() {
     // 处理每个文件
     for (let i = 0; i < files.length; i++) {
         log(`[${i + 1}/${files.length}]`);
-        await processFile(files[i]);
+        
+        const success = await processFile(files[i]);
         console.log(); // 空行分隔
         
-        // 避免API限流，每处理一个文件延迟一下
-        if (i < files.length - 1) {
-            await delay(500);
+        // 如果处理失败且可能是限流问题，增加延迟
+        if (!success && stats.errors > 0) {
+            // 如果连续失败，说明可能遇到限流，增加等待时间
+            const waitTime = Math.min(stats.errors * 2000, 10000); // 最多等10秒
+            log(`⏳ Detected potential rate limiting, waiting ${waitTime/1000}s before next file...`);
+            await delay(waitTime);
+        } else if (i < files.length - 1) {
+            // 正常情况下的基础延迟，避免API限流
+            await delay(1000); // 增加到1秒
         }
     }
     
