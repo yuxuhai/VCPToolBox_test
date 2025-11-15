@@ -291,10 +291,10 @@ async function generateTagsWithAI(content, maxRetries = 3) {
  * 处理单个文件的Tag
  */
 async function processFile(filePath) {
+    let apiCalled = false;
     try {
         log(`Processing: ${filePath}`);
         
-        // 读取文件内容
         const content = await fs.readFile(filePath, 'utf-8');
         const detection = detectTagLine(content);
         
@@ -302,7 +302,6 @@ async function processFile(filePath) {
         let finalContent = content;
         
         if (detection.hasTag) {
-            // 有Tag，检查格式
             if (isTagFormatValid(detection.lastLine)) {
                 log(`  ✓ Tag format is valid`);
                 stats.skipped++;
@@ -315,8 +314,8 @@ async function processFile(filePath) {
                 log(`  ✓ Fixed tag: ${fixedTag}`);
             }
         } else {
-            // 没有Tag，生成新Tag
             log(`  ⚠ No tag found, generating...`);
+            apiCalled = true;
             const generatedTag = await generateTagsWithAI(content);
             
             if (generatedTag) {
@@ -328,23 +327,22 @@ async function processFile(filePath) {
             } else {
                 error(`  ✗ Failed to generate tag`);
                 stats.errors++;
-                return false;
+                return { success: false, apiCalled };
             }
         }
         
-        // 如果内容被修改，写回文件
         if (modified) {
             await fs.writeFile(filePath, finalContent, 'utf-8');
             log(`  ✓ File updated`);
             stats.processed++;
         }
         
-        return true;
+        return { success: true, apiCalled };
         
     } catch (err) {
         error(`Error processing ${filePath}:`, err.message);
         stats.errors++;
-        return false;
+        return { success: false, apiCalled: false };
     }
 }
 
@@ -428,18 +426,20 @@ async function main() {
     for (let i = 0; i < files.length; i++) {
         log(`[${i + 1}/${files.length}]`);
         
-        const success = await processFile(files[i]);
+        const result = await processFile(files[i]);
         console.log(); // 空行分隔
         
-        // 如果处理失败且可能是限流问题，增加延迟
-        if (!success && stats.errors > 0) {
-            // 如果连续失败，说明可能遇到限流，增加等待时间
-            const waitTime = Math.min(stats.errors * 2000, 10000); // 最多等10秒
-            log(`⏳ Detected potential rate limiting, waiting ${waitTime/1000}s before next file...`);
-            await delay(waitTime);
-        } else if (i < files.length - 1) {
-            // 正常情况下的基础延迟，避免API限流
-            await delay(1000); // 增加到1秒
+        // 仅在调用了AI时才应用延迟
+        if (result.apiCalled) {
+            // 如果处理失败，可能是限流，增加退避延迟
+            if (!result.success) {
+                const waitTime = Math.min(stats.errors * 2000, 10000); // 最多等10秒
+                log(`⏳ Detected potential rate limiting, waiting ${waitTime/1000}s before next file...`);
+                await delay(waitTime);
+            } else if (i < files.length - 1) {
+                // 正常情况下的基础延迟，避免API限流
+                await delay(1000);
+            }
         }
     }
     
