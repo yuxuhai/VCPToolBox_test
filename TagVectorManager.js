@@ -143,7 +143,7 @@ class TagVectorManager {
             if (this.globalTags.size === 0) return;
 
             await this.vectorizeAllTags();
-            this.buildHNSWIndex();
+            await this.buildHNSWIndex();
 
         } finally {
             this.isBuilding = false;
@@ -281,9 +281,9 @@ class TagVectorManager {
     }
 
     /**
-     * ✅ 修复问题1: 构建HNSW索引（保持label映射一致性 + 动态扩容）
+     * ✅ 修复问题1: 构建HNSW索引（保持label映射一致性 + 动态扩容 + 非阻塞批处理）
      */
-    buildHNSWIndex() {
+    async buildHNSWIndex() {
         try {
             const tagsWithVectors = Array.from(this.globalTags.entries())
                 .filter(([_, data]) => data.vector !== null);
@@ -344,11 +344,14 @@ class TagVectorManager {
                 console.log(`[TagVectorManager] Preserving ${this.tagToLabel.size} existing label mappings`);
             }
 
-            // ✅ 批量添加向量（保持label一致性）
+            // ✅ 批量添加向量（保持label一致性 + 非阻塞处理）
             let successCount = 0;
             const labelsToRemove = new Set(this.tagToLabel.values());
+            const BATCH_SIZE = 100; // ✅ 每100个tag让出一次控制权
             
-            for (const [tag, data] of tagsWithVectors) {
+            for (let i = 0; i < tagsWithVectors.length; i++) {
+                const [tag, data] = tagsWithVectors[i];
+                
                 try {
                     // ✅ 确保向量是普通数组类型
                     const vector = data.vector instanceof Float32Array
@@ -371,6 +374,13 @@ class TagVectorManager {
                 } catch (error) {
                     console.error(`[TagVectorManager] Failed to add tag "${tag}":`, error.message);
                     // 继续处理其他tags
+                }
+                
+                // ✅ 关键修复：定期让出控制权，防止事件循环阻塞
+                if ((i + 1) % BATCH_SIZE === 0) {
+                    await new Promise(resolve => setImmediate(resolve));
+                    const progress = ((i + 1) / tagsWithVectors.length * 100).toFixed(1);
+                    console.log(`[TagVectorManager] Index building progress: ${progress}% (${i + 1}/${tagsWithVectors.length})`);
                 }
             }
 
@@ -399,6 +409,57 @@ class TagVectorManager {
             });
             throw error;
         }
+    }
+
+    /**
+     * ✅ 增量添加tags到索引（避免完全重建）
+     */
+    async addTagsToIndex(tagNames) {
+        if (!this.tagIndex) {
+            throw new Error('Index not initialized');
+        }
+        
+        const existingLabels = new Set(this.tagToLabel.values());
+        const maxExistingLabel = existingLabels.size > 0 ? Math.max(...existingLabels) : -1;
+        let nextAvailableLabel = maxExistingLabel + 1;
+        
+        let successCount = 0;
+        const BATCH_SIZE = 100;
+        
+        for (let i = 0; i < tagNames.length; i++) {
+            const tag = tagNames[i];
+            const tagData = this.globalTags.get(tag);
+            
+            if (!tagData || !tagData.vector) {
+                console.warn(`[TagVectorManager] Tag "${tag}" has no vector, skipping`);
+                continue;
+            }
+            
+            try {
+                const vector = tagData.vector instanceof Float32Array
+                    ? Array.from(tagData.vector)
+                    : (Array.isArray(tagData.vector) ? tagData.vector : Array.from(tagData.vector));
+                
+                // 分配新label
+                const label = nextAvailableLabel++;
+                this.tagToLabel.set(tag, label);
+                this.labelToTag.set(label, tag);
+                
+                this.tagIndex.addPoint(vector, label);
+                successCount++;
+                
+                // 定期让出控制权
+                if ((i + 1) % BATCH_SIZE === 0) {
+                    await new Promise(resolve => setImmediate(resolve));
+                    console.log(`[TagVectorManager] Added ${i + 1}/${tagNames.length} new tags to index`);
+                }
+            } catch (error) {
+                console.error(`[TagVectorManager] Failed to add tag "${tag}" to index:`, error.message);
+            }
+        }
+        
+        console.log(`[TagVectorManager] ✅ Added ${successCount}/${tagNames.length} tags to index`);
+        return successCount;
     }
 
     /**
@@ -586,19 +647,31 @@ class TagVectorManager {
             await fs.writeFile(tempLabelMapPath, JSON.stringify(labelMapData, null, 2), 'utf-8');
             tempFiles.push({ temp: tempLabelMapPath, final: labelMapPath });
             
-            // 3.4 写入向量分片到临时文件
-            for (const shard of shardDataList) {
+            // 3.4 写入向量分片到临时文件（✅ 非阻塞JSON序列化）
+            for (let i = 0; i < shardDataList.length; i++) {
+                const shard = shardDataList[i];
                 const tempShardPath = `${vectorBasePath}_${shard.index}.json.tmp`;
                 const shardWithMeta = {
                     checksum: shard.checksum,
                     version: this.config.dataVersion,
                     vectors: shard.data
                 };
+                
+                // ✅ 序列化大JSON前让出控制权
+                if (i > 0 && i % 2 === 0) {
+                    await new Promise(resolve => setImmediate(resolve));
+                }
+                
                 await fs.writeFile(tempShardPath, JSON.stringify(shardWithMeta), 'utf-8');
                 tempFiles.push({
                     temp: tempShardPath,
                     final: `${vectorBasePath}_${shard.index}.json`
                 });
+                
+                // ✅ 显示进度
+                if (shardDataList.length > 1) {
+                    console.log(`[TagVectorManager] Writing shard ${i + 1}/${shardDataList.length}...`);
+                }
             }
             
             // 4. ✅ 所有临时文件写入成功，开始原子重命名
@@ -785,7 +858,13 @@ class TagVectorManager {
 
         const dimensions = tagsWithVectors[0][1].vector.length;
         tempTagIndex = new HierarchicalNSW('l2', dimensions);
+        
+        // ✅ 同步读取HNSW索引（添加日志提示，避免误以为卡死）
+        console.log('[TagVectorManager] 📖 Reading HNSW index (this may take 10-30 seconds for large libraries)...');
+        const startTime = Date.now();
         tempTagIndex.readIndexSync(indexPath);
+        const loadTime = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`[TagVectorManager] ✅ HNSW index loaded in ${loadTime}s`);
 
         // ✅ Bug #1修复: 尝试加载Label映射
         try {
@@ -905,7 +984,7 @@ class TagVectorManager {
                 }
             }
 
-            this.buildHNSWIndex();
+            await this.buildHNSWIndex();
             
             const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
             const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
@@ -1021,12 +1100,28 @@ class TagVectorManager {
             await this.vectorizeTagBatch(tagsToAdd);
         }
         
-        // Step 7: 只在有变化时重建索引
+        // Step 7: 增量更新索引（只添加新tag，避免完全重建）
         if (tagsToAdd.length > 0 || tagsToRemove.length > 0) {
             if (this.globalTags.size > 0) {
                 const vectorizedCount = Array.from(this.globalTags.values()).filter(d => d.vector !== null).length;
-                console.log(`[TagVectorManager] Rebuilding HNSW index with ${vectorizedCount} vectorized tags...`);
-                this.buildHNSWIndex();
+                
+                // ✅ 优化：只有新增tag或索引不存在时才需要添加
+                if (tagsToAdd.length > 0) {
+                    if (!this.tagIndex) {
+                        // 索引不存在，完全重建
+                        console.log(`[TagVectorManager] Building HNSW index with ${vectorizedCount} vectorized tags...`);
+                        await this.buildHNSWIndex();
+                    } else {
+                        // 索引已存在，增量添加新tag
+                        console.log(`[TagVectorManager] Adding ${tagsToAdd.length} new tags to existing index (total: ${vectorizedCount})...`);
+                        await this.addTagsToIndex(tagsToAdd);
+                    }
+                }
+                
+                // ✅ 删除tag的情况：只清理映射，不重建索引（标记删除）
+                if (tagsToRemove.length > 0) {
+                    console.log(`[TagVectorManager] Marked ${tagsToRemove.length} tags as deleted (mappings cleaned)`);
+                }
             }
         }
         
