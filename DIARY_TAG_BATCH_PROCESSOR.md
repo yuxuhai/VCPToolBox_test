@@ -343,4 +343,158 @@ DebugMode=true
 
 ---
 
+## 附录：独立配置文件模板
+
+### 说明
+
+本工具可以通过独立的配置文件在其他项目中使用。以下提供完整的配置模板，可直接复制使用。
+
+### 配置文件：`tag-processor-config.env`
+
+```env
+# ============================================================
+# VCP Tag处理器独立配置文件
+# ============================================================
+#
+# 用途：为日记批量打Tag工具提供配置
+# 位置：可放在任意目录，通过 --config 参数指定
+#
+# 使用示例：
+#   node diary-tag-batch-processor.js --config ./tag-processor-config.env ./my-diaries
+#
+# ============================================================
+
+# ------------------------------------------------------------
+# [必需] API配置
+# ------------------------------------------------------------
+# 用于调用AI模型生成Tag的API配置
+# 支持OpenAI兼容API（如OpenRouter、One-API等中转服务）
+
+# API密钥
+API_Key=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# API地址（不要包含/v1/chat/completions，工具会自动添加）
+API_URL=https://api.openai.com
+# 或使用本地转发
+# API_URL=http://127.0.0.1:3000
+
+
+# ------------------------------------------------------------
+# [推荐] Tag生成模型配置
+# ------------------------------------------------------------
+# 用于生成高质量Tag的AI模型
+
+# 模型名称
+# 推荐：claude-sonnet-4-20250514（最佳质量）
+# 备选：gpt-4o（速度快）、gpt-4o-mini（成本低）
+TagModel=claude-sonnet-4-20250514
+
+# 模型最大Token限制（输入+输出）
+TagModelMaxTokens=40000
+
+# 模型最大输出Token限制
+TagModelMaxOutPutTokens=30000
+
+# Tag生成提示词文件路径（相对于工具所在目录）
+# 默认使用 Plugin/DailyNoteWrite/TagMaster.txt
+TagModelPrompt=TagMaster.txt
+
+
+# ------------------------------------------------------------
+# [可选] 调试选项
+# ------------------------------------------------------------
+# 启用详细日志输出（true/false）
+DebugMode=false
+
+
+# ------------------------------------------------------------
+# [可选] 日记文件扩展名
+# ------------------------------------------------------------
+# 工具会自动处理的文件类型（硬编码为 .txt 和 .md）
+# 此配置项仅用于DailyNoteWrite插件
+DAILY_NOTE_EXTENSION=txt
+
+
+# ============================================================
+# 模型选择指南
+# ============================================================
+#
+# 【最佳质量】Claude Sonnet 4/4.5
+# TagModel=claude-sonnet-4-20250514
+# TagModel=claude-sonnet-4.5-20250929
+# - 最强的结构化输出能力
+# - 最好的中文理解
+# - 最准确的关键词提取
+# - 推荐用于知识图谱构建
+#
+# 【速度优先】GPT-4o
+# TagModel=gpt-4o
+# - 响应速度快
+# - 质量稳定
+# - 成本适中
+#
+# 【成本优先】GPT-4o-mini
+# TagModel=gpt-4o-mini
+# - 最低成本
+# - 速度最快
+# - 质量略逊但可接受
+#
+# 【不推荐】Gemini Flash
+# TagModel=gemini-2.5-flash-preview-09-2025-thinking
+# - 便宜但格式控制较弱
+# - 可能偏离Tag格式要求
+#
+# ============================================================
+```
+
+### 如何使用独立配置
+
+#### 方法1：替换主配置（简单）
+
+将上述配置内容保存为 `config.env`，放在VCP根目录：
+
+```bash
+# 配置会自动加载
+node diary-tag-batch-processor.js ./my-diaries
+```
+
+#### 方法2：使用自定义路径（高级）
+
+如果需要在其他项目中使用，可以修改工具代码加载配置路径：
+
+```javascript
+// 在 diary-tag-batch-processor.js 开头修改
+require('dotenv').config({ path: '/path/to/your/tag-processor-config.env' });
+```
+
+### 最小配置示例
+
+如果只想快速测试，最少需要配置：
+
+```env
+# 最小配置
+API_Key=your_api_key_here
+API_URL=https://api.openai.com
+TagModel=claude-sonnet-4-20250514
+```
+
+其他参数会使用默认值。
+
+### 配置验证
+
+运行工具前，可以通过以下方式验证配置：
+
+```bash
+node -e "require('dotenv').config(); console.log('API_Key:', process.env.API_Key ? '✓ 已配置' : '✗ 缺失'); console.log('API_URL:', process.env.API_URL || '✗ 缺失'); console.log('TagModel:', process.env.TagModel || 'gemini-2.5-flash-preview-09-2025-thinking (默认)');"
+```
+
+预期输出：
+```
+API_Key: ✓ 已配置
+API_URL: https://api.openai.com
+TagModel: claude-sonnet-4-20250514
+```
+
+---
+
 **注意：** 本工具会修改文件内容，使用前请务必备份重要数据！
