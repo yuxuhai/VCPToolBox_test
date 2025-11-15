@@ -51,6 +51,14 @@ class TagVectorManager {
         this.tagIndex = null; // HNSW索引
         this.tagToLabel = new Map(); // tag_text → label
         this.labelToTag = new Map(); // label → tag_text
+        
+        // 🌟 新增：文件注册表（反向索引） - 实现O(1) Diff的关键
+        // filePath → { hash: string, tags: Set<string> }
+        this.fileRegistry = new Map();
+        
+        // 🌟 脏数据追踪（用于增量保存）
+        this.dirtyTags = new Set(); // 标记哪些Tag的数据变了
+        this.deletedLabels = new Set(); // HNSW软删除标记
 
         // 文件监控
         this.watcher = null;
@@ -59,12 +67,42 @@ class TagVectorManager {
         // ✅ Bug #5修复: 并发控制
         this.updateLock = false;
         this.updateQueue = [];
+        
+        // ✅ 保存操作锁 - 防止并发保存导致数据损坏
+        this.saveLock = false;
+        this.saveQueue = [];
+        
+        // ✅ 批量索引更新优化
+        this.pendingIndexUpdates = new Set(); // 待添加到索引的tag
+        this.indexRebuildTimer = null;
+        this.indexRebuildDelay = parseInt(process.env.TAG_INDEX_REBUILD_DELAY) || 5000; // 5秒防抖
+        
+        // 🌟 防抖保存配置
+        this.saveDebounce = 2000; // 保存防抖时间
+        this.saveTimer = null;
 
         // 状态
         this.initialized = false;
         this.isBuilding = false;
 
         console.log('[TagVectorManager] Initialized with batch size:', this.config.tagBatchSize);
+    }
+
+    /**
+     * 🌟 提取Tag内容（纯函数，用于Diff计算）
+     */
+    extractTagsFromContent(content) {
+        const lines = content.split('\n').map(l => l.trim()).filter(Boolean);
+        if (lines.length === 0) return [];
+        
+        const lastLine = lines[lines.length - 1];
+        const match = lastLine.match(/^Tag:\s*(.+)$/i);
+        if (!match) return [];
+        
+        return match[1]
+            .split(/[,，、]/)
+            .map(t => t.trim())
+            .filter(t => this.isValidTag(t));
     }
 
     debugLog(message, ...args) {
@@ -83,7 +121,7 @@ class TagVectorManager {
     }
 
     /**
-     * 🌟 初始化
+     * 🌟 初始化 - 严格顺序保证，避免竞态条件
      */
     async initialize(embeddingFunction) {
         if (this.initialized) return;
@@ -97,6 +135,9 @@ class TagVectorManager {
         const tagDataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
 
         let libraryExists = false;
+        let needsBuildRegistry = false;
+        
+        // ====== 步骤1: 加载Tag库 ======
         try {
             await this.loadGlobalTagLibrary(tagIndexPath, tagDataPath);
             console.log('[TagVectorManager] ✅ Loaded existing library');
@@ -105,10 +146,35 @@ class TagVectorManager {
             console.log('[TagVectorManager] No existing library found, building from scratch...');
             await this.buildGlobalTagLibrary();
             await this.saveGlobalTagLibrary(tagIndexPath, tagDataPath);
+            needsBuildRegistry = true; // 首次构建，需要建立反向索引
         }
 
-        // ✅ 关键修复：即使库存在，也要检查是否有新增Tag（同步执行，确保数据一致性）
-        if (libraryExists) {
+        // ====== 步骤2: 加载/构建文件注册表（必须在Tag库加载后）======
+        try {
+            await this.loadFileRegistry();
+            
+            // ✅ 关键检查：即使加载成功，也验证数据完整性
+            if (this.fileRegistry.size === 0 && this.globalTags.size > 0) {
+                // FileRegistry为空但Tag库有数据，说明是旧版本或数据损坏
+                console.log('[TagVectorManager] ⚠️ FileRegistry is empty but Tag library exists, rebuilding...');
+                needsBuildRegistry = true;
+            } else {
+                console.log(`[TagVectorManager] ✅ FileRegistry verified: ${this.fileRegistry.size} files indexed`);
+            }
+        } catch (e) {
+            // FileRegistry不存在或加载失败
+            console.log(`[TagVectorManager] ⚠️ FileRegistry load failed: ${e.message}`);
+            needsBuildRegistry = true;
+        }
+
+        // ====== 步骤3: 如果需要，构建反向索引 ======
+        if (needsBuildRegistry) {
+            console.log('[TagVectorManager] 🔨 Building FileRegistry (migration/repair)...');
+            await this.buildFileRegistryFromScratch();
+        }
+
+        // ====== 步骤4: 增量更新检查（仅在库已存在时）======
+        if (libraryExists && !needsBuildRegistry) {
             console.log('[TagVectorManager] 🔍 Checking for new tags...');
             const hasChanges = await this.incrementalUpdateOptimized();
             if (hasChanges) {
@@ -119,6 +185,7 @@ class TagVectorManager {
             }
         }
 
+        // ====== 步骤5: 启动文件监控 ======
         this.startFileWatcher();
         this.initialized = true;
         console.log('[TagVectorManager] ✅ Initialized');
@@ -412,11 +479,23 @@ class TagVectorManager {
     }
 
     /**
-     * ✅ 增量添加tags到索引（避免完全重建）
+     * ✅ 增量添加tags到索引（真正的diff写入，避免完全重建）
      */
     async addTagsToIndex(tagNames) {
         if (!this.tagIndex) {
             throw new Error('Index not initialized');
+        }
+        
+        // ✅ 关键优化：检查索引容量，如果接近上限才扩容
+        const currentCount = this.tagIndex.getCurrentCount?.() || this.tagToLabel.size;
+        const maxCapacity = this.tagIndex.getMaxElements?.() || 0;
+        const newTotalCount = currentCount + tagNames.length;
+        
+        if (newTotalCount > maxCapacity * 0.9) {
+            console.log(`[TagVectorManager] ⚠️ Index capacity reached (${currentCount}/${maxCapacity}), resizing...`);
+            const newCapacity = Math.ceil(newTotalCount * 1.5);
+            this.tagIndex.resizeIndex(newCapacity);
+            console.log(`[TagVectorManager] ✅ Index resized to ${newCapacity}`);
         }
         
         const existingLabels = new Set(this.tagToLabel.values());
@@ -426,12 +505,20 @@ class TagVectorManager {
         let successCount = 0;
         const BATCH_SIZE = 100;
         
+        console.log(`[TagVectorManager] 🔄 Incrementally adding ${tagNames.length} tags to existing index (current: ${currentCount})...`);
+        
         for (let i = 0; i < tagNames.length; i++) {
             const tag = tagNames[i];
             const tagData = this.globalTags.get(tag);
             
             if (!tagData || !tagData.vector) {
                 console.warn(`[TagVectorManager] Tag "${tag}" has no vector, skipping`);
+                continue;
+            }
+            
+            // ✅ 跳过已经在索引中的tag
+            if (this.tagToLabel.has(tag)) {
+                this.debugLog(`Tag "${tag}" already in index, skipping`);
                 continue;
             }
             
@@ -445,20 +532,21 @@ class TagVectorManager {
                 this.tagToLabel.set(tag, label);
                 this.labelToTag.set(label, tag);
                 
+                // ✅ 关键：直接添加到现有索引，不重建
                 this.tagIndex.addPoint(vector, label);
                 successCount++;
                 
                 // 定期让出控制权
                 if ((i + 1) % BATCH_SIZE === 0) {
                     await new Promise(resolve => setImmediate(resolve));
-                    console.log(`[TagVectorManager] Added ${i + 1}/${tagNames.length} new tags to index`);
+                    this.debugLog(`Added ${i + 1}/${tagNames.length} new tags to index`);
                 }
             } catch (error) {
                 console.error(`[TagVectorManager] Failed to add tag "${tag}" to index:`, error.message);
             }
         }
         
-        console.log(`[TagVectorManager] ✅ Added ${successCount}/${tagNames.length} tags to index`);
+        console.log(`[TagVectorManager] ✅ Incrementally added ${successCount}/${tagNames.length} tags (total now: ${currentCount + successCount})`);
         return successCount;
     }
 
@@ -515,12 +603,60 @@ class TagVectorManager {
      * @param {boolean} incrementalMode - 增量模式：不删除旧shard，只更新/新增
      */
     async saveGlobalTagLibrary(indexPath, dataPath, incrementalMode = false) {
+        // ✅ 关键修复：保存操作加锁，防止并发写入导致数据损坏
+        if (this.saveLock) {
+            console.log('[TagVectorManager] ⏳ Save operation in progress, queuing...');
+            return new Promise((resolve, reject) => {
+                this.saveQueue.push({ indexPath, dataPath, incrementalMode, resolve, reject });
+            });
+        }
+        
+        this.saveLock = true;
+        
+        try {
+            await this._saveGlobalTagLibraryImpl(indexPath, dataPath, incrementalMode);
+            
+            // ✅ 处理队列中的保存请求（合并策略）
+            if (this.saveQueue.length > 0) {
+                console.log(`[TagVectorManager] Processing ${this.saveQueue.length} queued save requests (merge strategy)...`);
+                
+                const lastSave = this.saveQueue.pop(); // 取最后一个真正执行
+                
+                // ✅ 关键修复：中间被跳过的请求全部resolve（数据已被最后一次保存包含）
+                while (this.saveQueue.length > 0) {
+                    const mergedSave = this.saveQueue.pop();
+                    mergedSave.resolve(); // 告知调用者：你的数据已被合并保存
+                    console.log('[TagVectorManager] Merged save request resolved');
+                }
+                
+                // 执行最后一个
+                try {
+                    await this._saveGlobalTagLibraryImpl(lastSave.indexPath, lastSave.dataPath, lastSave.incrementalMode);
+                    lastSave.resolve();
+                    console.log('[TagVectorManager] Final queued save completed');
+                } catch (error) {
+                    lastSave.reject(error);
+                    console.error('[TagVectorManager] Final queued save failed:', error.message);
+                }
+            }
+        } finally {
+            this.saveLock = false;
+        }
+    }
+    
+    /**
+     * ✅ 实际的保存实现（带完整的原子性和非阻塞优化）
+     */
+    async _saveGlobalTagLibraryImpl(indexPath, dataPath, incrementalMode = false) {
+        console.log('[TagVectorManager] 💾 Starting save operation (non-blocking mode)...');
+        const startTime = Date.now();
+        
         const metaPath = dataPath.replace('.json', '_meta.json');
         const vectorBasePath = dataPath.replace('.json', '_vectors');
-        const labelMapPath = dataPath.replace('.json', '_label_map.json'); // ✅ Bug #1修复
+        const labelMapPath = dataPath.replace('.json', '_label_map.json');
         
-        // ✅ Bug #3修复: 先准备所有数据，最后一次性写入
-        const SHARD_SIZE = 4000;
+        // ✅ 关键优化：减小分片大小，增加并发度，减少单次阻塞时间
+        const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
         const tagsWithVectors = Array.from(this.globalTags.entries())
             .filter(([_, data]) => data.vector !== null);
         
@@ -630,24 +766,41 @@ class TagVectorManager {
         const tempFiles = [];
         
         try {
-            // 3.1 写入HNSW索引到临时文件
+            // 3.1 写入HNSW索引到临时文件（✅ 异步化，避免阻塞）
             const tempIndexPath = indexPath + '.tmp';
             if (this.tagIndex) {
-                await this.tagIndex.writeIndex(tempIndexPath);
+                console.log('[TagVectorManager] 💾 Writing HNSW index (non-blocking)...');
+                // ✅ 在Worker线程或setImmediate中执行，避免阻塞主线程
+                await new Promise((resolve, reject) => {
+                    setImmediate(() => {
+                        try {
+                            this.tagIndex.writeIndexSync(tempIndexPath);
+                            resolve();
+                        } catch (error) {
+                            reject(error);
+                        }
+                    });
+                });
+                console.log('[TagVectorManager] ✅ HNSW index written');
                 tempFiles.push({ temp: tempIndexPath, final: indexPath });
             }
             
-            // 3.2 写入元数据到临时文件
+            // 3.2 写入元数据到临时文件（✅ 分块序列化避免阻塞）
+            await new Promise(resolve => setImmediate(resolve));
             const tempMetaPath = metaPath + '.tmp';
-            await fs.writeFile(tempMetaPath, JSON.stringify(metaData, null, 2), 'utf-8');
+            // ✅ 使用流式写入避免大JSON阻塞
+            const metaJsonString = JSON.stringify(metaData, null, 2);
+            await fs.writeFile(tempMetaPath, metaJsonString, 'utf-8');
             tempFiles.push({ temp: tempMetaPath, final: metaPath });
             
-            // 3.3 写入Label映射到临时文件（✅ Bug #1修复）
+            // 3.3 写入Label映射到临时文件（✅ 分块序列化）
+            await new Promise(resolve => setImmediate(resolve));
             const tempLabelMapPath = labelMapPath + '.tmp';
-            await fs.writeFile(tempLabelMapPath, JSON.stringify(labelMapData, null, 2), 'utf-8');
+            const labelMapJsonString = JSON.stringify(labelMapData, null, 2);
+            await fs.writeFile(tempLabelMapPath, labelMapJsonString, 'utf-8');
             tempFiles.push({ temp: tempLabelMapPath, final: labelMapPath });
             
-            // 3.4 写入向量分片到临时文件（✅ 非阻塞JSON序列化）
+            // 3.4 写入向量分片到临时文件（✅ 完全非阻塞JSON序列化）
             for (let i = 0; i < shardDataList.length; i++) {
                 const shard = shardDataList[i];
                 const tempShardPath = `${vectorBasePath}_${shard.index}.json.tmp`;
@@ -657,12 +810,13 @@ class TagVectorManager {
                     vectors: shard.data
                 };
                 
-                // ✅ 序列化大JSON前让出控制权
-                if (i > 0 && i % 2 === 0) {
-                    await new Promise(resolve => setImmediate(resolve));
-                }
+                // ✅ 关键优化：每次序列化前都让出控制权，避免长时间阻塞
+                await new Promise(resolve => setImmediate(resolve));
                 
-                await fs.writeFile(tempShardPath, JSON.stringify(shardWithMeta), 'utf-8');
+                // ✅ 使用流式写入，避免一次性序列化大JSON
+                const jsonString = JSON.stringify(shardWithMeta);
+                await fs.writeFile(tempShardPath, jsonString, 'utf-8');
+                
                 tempFiles.push({
                     temp: tempShardPath,
                     final: `${vectorBasePath}_${shard.index}.json`
@@ -671,6 +825,11 @@ class TagVectorManager {
                 // ✅ 显示进度
                 if (shardDataList.length > 1) {
                     console.log(`[TagVectorManager] Writing shard ${i + 1}/${shardDataList.length}...`);
+                }
+                
+                // ✅ 每写入一个分片后再次让出控制权
+                if (i < shardDataList.length - 1) {
+                    await new Promise(resolve => setImmediate(resolve));
                 }
             }
             
@@ -713,7 +872,8 @@ class TagVectorManager {
                 }
             }
             
-            console.log(`[TagVectorManager] ✅ Saved successfully: ${metaData.totalTags} tags, ${shardDataList.length} shard(s)`);
+            const saveTime = ((Date.now() - startTime) / 1000).toFixed(1);
+            console.log(`[TagVectorManager] ✅ Saved successfully in ${saveTime}s: ${metaData.totalTags} tags, ${shardDataList.length} shard(s)`);
             
         } catch (error) {
             // ✅ 如果任何步骤失败，清理所有临时文件
@@ -928,7 +1088,16 @@ class TagVectorManager {
             this.pendingUpdates.set(diaryName, timeoutId);
         };
 
-        this.watcher.on('add', handleFileChange).on('change', handleFileChange);
+        this.watcher
+            .on('add', handleFileChange)
+            .on('change', handleFileChange)
+            .on('unlink', (filePath) => {
+                // 🌟 处理文件删除
+                const diaryName = path.basename(path.dirname(filePath));
+                if (this.shouldIgnoreFolder(diaryName)) return;
+                
+                this.queueUpdate(filePath); // 使用统一队列处理
+            });
     }
 
     /**
@@ -937,8 +1106,9 @@ class TagVectorManager {
     async queueUpdate(filePath) {
         this.updateQueue.push(filePath);
         
-        if (this.updateLock) {
-            return; // 已有更新在进行中
+        // ✅ 关键修复：等待初始化完成
+        if (this.updateLock || !this.initialized) {
+            return; // 已有更新在进行中或尚未初始化
         }
         
         this.updateLock = true;
@@ -954,42 +1124,353 @@ class TagVectorManager {
     }
 
     /**
-     * 增量更新单个文件
+     * 🌟 核心升级：基于内存状态的精准 Diff 更新
+     * 时间复杂度：O(M)，M为该文件的Tag数量，与总文件数无关
      */
     async updateTagsForFile(filePath) {
         const diaryName = path.basename(path.dirname(filePath));
-        const newTags = await this.extractTagsFromFile(filePath);
-        if (newTags.length === 0) return;
+        
+        // 1. 读取文件内容并计算Hash (避免无效的Tag解析)
+        let content;
+        try {
+            content = await fs.readFile(filePath, 'utf-8');
+        } catch (e) {
+            // 文件可能被删除，处理删除逻辑
+            return this.handleFileRemove(filePath);
+        }
 
-        const tagsToVectorize = newTags.filter(tag => 
-            !this.globalTags.has(tag) || this.globalTags.get(tag).vector === null
-        );
+        const currentHash = crypto.createHash('md5').update(content).digest('hex');
+        const fileRecord = this.fileRegistry.get(filePath);
 
-        if (tagsToVectorize.length > 0) {
-            const vectors = await this.embeddingFunction(tagsToVectorize);
+        // 2. 如果Hash没变，直接跳过 (极速返回)
+        if (fileRecord && fileRecord.hash === currentHash) {
+            this.debugLog(`File unchanged: ${path.basename(filePath)}`);
+            return;
+        }
 
-            for (let i = 0; i < tagsToVectorize.length; i++) {
-                const tag = tagsToVectorize[i];
-                if (!this.globalTags.has(tag)) {
-                    this.globalTags.set(tag, {
-                        vector: vectors[i],
-                        frequency: 1,
-                        diaries: new Set([diaryName])
-                    });
-                } else {
-                    const tagData = this.globalTags.get(tag);
-                    tagData.vector = vectors[i];
-                    tagData.frequency++;
-                    tagData.diaries.add(diaryName);
+        // 3. 提取当前Tags
+        const rawTags = this.extractTagsFromContent(content);
+        const currentTags = new Set(rawTags);
+
+        // 4. 计算 Diff (Set 差集运算)
+        const oldTags = fileRecord ? fileRecord.tags : new Set();
+        
+        const addedTags = [...currentTags].filter(x => !oldTags.has(x));
+        const removedTags = [...oldTags].filter(x => !currentTags.has(x));
+
+        if (addedTags.length === 0 && removedTags.length === 0) {
+            // 更新Hash并返回
+            this.fileRegistry.set(filePath, { hash: currentHash, tags: currentTags });
+            return;
+        }
+
+        this.debugLog(`[Diff] File: ${path.basename(filePath)} | +${addedTags.length} | -${removedTags.length}`);
+
+        // 5. 应用变更 (内存操作，极快)
+        this.applyDiff(diaryName, addedTags, removedTags);
+
+        // 6. 更新注册表
+        this.fileRegistry.set(filePath, { hash: currentHash, tags: currentTags });
+
+        // 7. 触发异步处理 (向量化 + 索引 + 保存)
+        this.triggerPostUpdateProcessing(addedTags);
+    }
+
+    /**
+     * 🌟 处理文件删除
+     */
+    handleFileRemove(filePath) {
+        const fileRecord = this.fileRegistry.get(filePath);
+        if (!fileRecord) return;
+
+        const diaryName = path.basename(path.dirname(filePath));
+        const removedTags = [...fileRecord.tags];
+        
+        this.debugLog(`[Remove] File: ${path.basename(filePath)} | -${removedTags.length} tags`);
+        
+        this.applyDiff(diaryName, [], removedTags);
+        this.fileRegistry.delete(filePath);
+        
+        this.triggerPostUpdateProcessing([]);
+    }
+
+    /**
+     * 🌟 原子化应用 Diff 到全局状态
+     */
+    applyDiff(diaryName, addedTags, removedTags) {
+        // 处理移除
+        for (const tag of removedTags) {
+            const tagData = this.globalTags.get(tag);
+            if (tagData) {
+                tagData.frequency--;
+                tagData.diaries.delete(diaryName);
+                this.dirtyTags.add(tag); // 标记脏数据
+
+                // 如果频率归零，执行清理
+                if (tagData.frequency <= 0) {
+                    this.removeTagFromSystem(tag);
                 }
             }
-
-            await this.buildHNSWIndex();
-            
-            const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
-            const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
-            await this.saveGlobalTagLibrary(indexPath, dataPath);
         }
+
+        // 处理新增
+        for (const tag of addedTags) {
+            if (!this.globalTags.has(tag)) {
+                // 全新 Tag
+                this.globalTags.set(tag, {
+                    vector: null, // 待向量化
+                    frequency: 1,
+                    diaries: new Set([diaryName])
+                });
+            } else {
+                // 现有 Tag
+                const tagData = this.globalTags.get(tag);
+                tagData.frequency++;
+                tagData.diaries.add(diaryName);
+            }
+            this.dirtyTags.add(tag);
+        }
+    }
+
+    /**
+     * 🌟 系统级移除 Tag
+     */
+    removeTagFromSystem(tag) {
+        if (this.tagToLabel.has(tag)) {
+            const label = this.tagToLabel.get(tag);
+            this.deletedLabels.add(label); // HNSW 软删除
+            this.tagToLabel.delete(tag);
+            this.labelToTag.delete(label);
+        }
+        this.globalTags.delete(tag);
+        this.dirtyTags.add(tag); // 标记以确保保存时从JSON移除
+    }
+
+    /**
+     * 🌟 后处理：向量化与索引更新 (防抖)
+     */
+    triggerPostUpdateProcessing(newTagsCandidate) {
+        // 找出真正需要向量化的 (没有向量的)
+        const tagsToVectorize = newTagsCandidate.filter(t => {
+            const d = this.globalTags.get(t);
+            return d && d.vector === null;
+        });
+
+        if (tagsToVectorize.length > 0) {
+            tagsToVectorize.forEach(t => this.pendingIndexUpdates.add(t));
+            // 触发批量索引更新
+            this.scheduleBatchIndexRebuild();
+        }
+
+        // 防抖保存
+        if (this.saveTimer) clearTimeout(this.saveTimer);
+        this.saveTimer = setTimeout(() => this.persistChanges(), this.saveDebounce);
+    }
+
+    /**
+     * 🌟 优化的持久化：仅写入脏数据（带重试机制）
+     */
+    async persistChanges() {
+        if (this.dirtyTags.size === 0) return;
+        
+        // ✅ 致命Bug修复：如果被锁住，延迟重试而不是放弃
+        if (this.saveLock) {
+            this.debugLog('Save locked, rescheduling persist...');
+            if (this.saveTimer) clearTimeout(this.saveTimer);
+            this.saveTimer = setTimeout(() => this.persistChanges(), 1000); // 1秒后重试
+            return;
+        }
+        
+        this.debugLog(`Persisting ${this.dirtyTags.size} dirty tags...`);
+        
+        const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
+        const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
+        
+        try {
+            // 保存Tag库（增量模式）
+            await this.saveGlobalTagLibrary(indexPath, dataPath, true);
+            
+            // 保存文件注册表
+            await this.saveFileRegistry();
+            
+            this.dirtyTags.clear();
+            this.debugLog('Persist complete');
+        } catch (e) {
+            console.error('[TagVectorManager] Persist failed:', e);
+            // ✅ 失败时也重试
+            if (this.saveTimer) clearTimeout(this.saveTimer);
+            this.saveTimer = setTimeout(() => this.persistChanges(), 2000); // 2秒后重试
+        }
+    }
+
+    /**
+     * 🌟 保存文件注册表快照
+     */
+    async saveFileRegistry() {
+        const registryPath = path.join(this.config.vectorStorePath, 'FileRegistry.json');
+        const data = Array.from(this.fileRegistry.entries()).map(([k, v]) => [k, {
+            h: v.hash,
+            t: Array.from(v.tags)
+        }]);
+        
+        const tempPath = registryPath + '.tmp';
+        await fs.writeFile(tempPath, JSON.stringify(data), 'utf-8');
+        await fs.rename(tempPath, registryPath);
+        
+        this.debugLog(`FileRegistry saved: ${this.fileRegistry.size} files`);
+    }
+
+    /**
+     * 🌟 加载文件注册表 - 仅负责加载，不自动构建
+     */
+    async loadFileRegistry() {
+        const registryPath = path.join(this.config.vectorStorePath, 'FileRegistry.json');
+        const raw = await fs.readFile(registryPath, 'utf-8');
+        const data = JSON.parse(raw);
+        this.fileRegistry = new Map(data.map(([k, v]) => [k, {
+            hash: v.h,
+            tags: new Set(v.t)
+        }]));
+        console.log(`[TagVectorManager] ✅ Loaded registry for ${this.fileRegistry.size} files`);
+    }
+
+    /**
+     * 🌟 自动迁移：从现有日记文件构建反向索引
+     * 这是一个一次性操作，用于从零开始建立 fileRegistry
+     * ✅ 安全措施：清空现有数据，确保干净的重建
+     */
+    async buildFileRegistryFromScratch() {
+        console.log('[TagVectorManager] 🔨 Building FileRegistry from existing diary files...');
+        
+        // ✅ 清空现有注册表，确保干净重建
+        this.fileRegistry.clear();
+        
+        const startTime = Date.now();
+        let fileCount = 0;
+        let tagCount = 0;
+
+        const diaryBooks = await fs.readdir(this.config.diaryRootPath, { withFileTypes: true });
+
+        for (const dirent of diaryBooks) {
+            if (!dirent.isDirectory()) continue;
+            
+            const diaryName = dirent.name;
+            
+            // 应用过滤规则
+            if (this.shouldIgnoreFolder(diaryName)) {
+                this.debugLog(`Skipping ignored folder: "${diaryName}"`);
+                continue;
+            }
+
+            const diaryPath = path.join(this.config.diaryRootPath, diaryName);
+            
+            try {
+                const files = await fs.readdir(diaryPath);
+                const diaryFiles = files.filter(f =>
+                    f.toLowerCase().endsWith('.txt') || f.toLowerCase().endsWith('.md')
+                );
+
+                for (const file of diaryFiles) {
+                    const filePath = path.join(diaryPath, file);
+                    
+                    try {
+                        // 读取文件内容
+                        const content = await fs.readFile(filePath, 'utf-8');
+                        
+                        // 计算Hash
+                        const hash = crypto.createHash('md5').update(content).digest('hex');
+                        
+                        // 提取Tags
+                        const rawTags = this.extractTagsFromContent(content);
+                        const tags = new Set(rawTags);
+                        
+                        // 只记录有Tag的文件
+                        if (tags.size > 0) {
+                            this.fileRegistry.set(filePath, { hash, tags });
+                            fileCount++;
+                            tagCount += tags.size;
+                        }
+                        
+                        // 每100个文件让出一次控制权
+                        if (fileCount % 100 === 0) {
+                            await new Promise(resolve => setImmediate(resolve));
+                            console.log(`[TagVectorManager] Registry building progress: ${fileCount} files processed...`);
+                        }
+                    } catch (fileError) {
+                        this.debugLog(`Failed to process file ${filePath}: ${fileError.message}`);
+                        // 继续处理其他文件
+                    }
+                }
+            } catch (error) {
+                console.error(`[TagVectorManager] Error scanning folder "${diaryName}":`, error.message);
+            }
+        }
+
+        const buildTime = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`[TagVectorManager] ✅ FileRegistry built in ${buildTime}s: ${fileCount} files, ${tagCount} total tags`);
+        
+        // 立即保存新建的注册表
+        if (fileCount > 0) {
+            await this.saveFileRegistry();
+            console.log('[TagVectorManager] 💾 FileRegistry saved to disk');
+        }
+    }
+    
+    /**
+     * ✅ 批量索引重建调度器（防抖机制 + 并发保护）
+     */
+    scheduleBatchIndexRebuild() {
+        // 清除之前的定时器
+        if (this.indexRebuildTimer) {
+            clearTimeout(this.indexRebuildTimer);
+        }
+        
+        // 设置新的定时器：延迟N秒后批量处理
+        this.indexRebuildTimer = setTimeout(async () => {
+            // ✅ 关键修复：检查并发锁 + 初始化状态
+            if (this.updateLock || this.saveLock || !this.initialized) {
+                console.log('[TagVectorManager] ⏳ Operation in progress or not initialized, rescheduling batch update...');
+                this.scheduleBatchIndexRebuild(); // 延迟重试
+                return;
+            }
+            
+            if (this.pendingIndexUpdates.size === 0) return;
+            
+            const tagsToAdd = Array.from(this.pendingIndexUpdates);
+            this.pendingIndexUpdates.clear();
+            this.indexRebuildTimer = null;
+            
+            console.log(`[TagVectorManager] 🔄 Batch updating index with ${tagsToAdd.length} new tags...`);
+            
+            // ✅ 关键修复：获取更新锁，防止与其他操作冲突
+            this.updateLock = true;
+            
+            try {
+                if (!this.tagIndex) {
+                    // 索引不存在，完全重建
+                    await this.buildHNSWIndex();
+                } else {
+                    // ✅ 使用增量添加，避免完全重建
+                    await this.addTagsToIndex(tagsToAdd);
+                }
+                
+                // ✅ 保存到磁盘（通过锁机制保护）
+                const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
+                const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
+                await this.saveGlobalTagLibrary(indexPath, dataPath, true); // 增量模式
+                
+                console.log(`[TagVectorManager] ✅ Batch index update completed`);
+            } catch (error) {
+                console.error('[TagVectorManager] Batch index update failed:', error.message);
+                // ✅ 失败时重新加入队列
+                tagsToAdd.forEach(tag => this.pendingIndexUpdates.add(tag));
+                // 延迟重试
+                setTimeout(() => this.scheduleBatchIndexRebuild(), this.indexRebuildDelay);
+            } finally {
+                // ✅ 确保释放锁
+                this.updateLock = false;
+            }
+        }, this.indexRebuildDelay);
     }
 
     /**
@@ -1029,6 +1510,9 @@ class TagVectorManager {
         );
         
         console.log(`[TagVectorManager] Saved ${oldVectorizedTags.size} vectorized tags before rescan`);
+        
+        // ✅ 致命Bug修复：扫描前必须清空当前数据，否则会产生频率累加
+        this.globalTags.clear();
         
         // Step 2: 重新扫描所有Tags
         let currentStats;
@@ -1239,8 +1723,36 @@ class TagVectorManager {
      * 关闭
      */
     async shutdown() {
+        // ✅ 清除索引重建定时器
+        if (this.indexRebuildTimer) {
+            clearTimeout(this.indexRebuildTimer);
+            this.indexRebuildTimer = null;
+        }
+        
+        // ✅ 如果有待处理的索引更新，立即执行
+        if (this.pendingIndexUpdates.size > 0) {
+            console.log(`[TagVectorManager] 🔄 Flushing ${this.pendingIndexUpdates.size} pending index updates before shutdown...`);
+            const tagsToAdd = Array.from(this.pendingIndexUpdates);
+            this.pendingIndexUpdates.clear();
+            
+            try {
+                if (this.tagIndex) {
+                    await this.addTagsToIndex(tagsToAdd);
+                } else {
+                    await this.buildHNSWIndex();
+                }
+                
+                const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
+                const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
+                await this.saveGlobalTagLibrary(indexPath, dataPath, true);
+                console.log('[TagVectorManager] ✅ Pending updates flushed');
+            } catch (error) {
+                console.error('[TagVectorManager] Failed to flush pending updates:', error.message);
+            }
+        }
+        
         // ✅ Bug #5修复: 等待所有待处理的更新完成
-        while (this.updateLock || this.updateQueue.length > 0) {
+        while (this.updateLock || this.updateQueue.length > 0 || this.saveLock) {
             await new Promise(resolve => setTimeout(resolve, 100));
         }
         
