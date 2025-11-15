@@ -231,6 +231,9 @@ class VectorDBManager {
         // ✅ 批量处理，避免并发问题
         const updateTasks = [];
         
+        // ✅ 新增：收集当前存在的日记本名称
+        const currentDiaryNames = new Set();
+        
         for (const dirent of diaryBooks) {
             if (dirent.isDirectory()) {
                 const diaryName = dirent.name;
@@ -238,6 +241,8 @@ class VectorDBManager {
                     console.log(`[VectorDB] Ignoring folder "${diaryName}" as it is in the exclusion list.`);
                     continue;
                 }
+                
+                currentDiaryNames.add(diaryName);
                 const diaryPath = path.join(DIARY_ROOT_PATH, diaryName);
                 
                 const needsUpdate = await this.checkIfUpdateNeeded(diaryName, diaryPath);
@@ -247,6 +252,15 @@ class VectorDBManager {
                 } else {
                     console.log(`[VectorDB] "${diaryName}" is up-to-date. Index will be loaded on demand.`);
                 }
+            }
+        }
+        
+        // ✅ 新增：清理数据库中已删除的日记本
+        const dbDiaryNames = this.storage.getAllDiaryNames();
+        for (const dbDiaryName of dbDiaryNames) {
+            if (!currentDiaryNames.has(dbDiaryName)) {
+                console.log(`[VectorDB] Found orphaned database entry for deleted diary "${dbDiaryName}". Cleaning up...`);
+                await this.cleanupDeletedDiary(dbDiaryName);
             }
         }
         
