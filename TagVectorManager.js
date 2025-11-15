@@ -312,17 +312,23 @@ class TagVectorManager {
             this.tagToLabel.clear();
             this.labelToTag.clear();
 
-            // ✅ 批量添加向量（带错误恢复）
+            // ✅ 批量添加向量（带错误恢复 + 类型转换）
             let successCount = 0;
             for (let i = 0; i < tagsWithVectors.length; i++) {
                 const [tag, data] = tagsWithVectors[i];
                 try {
-                    this.tagIndex.addPoint(data.vector, i);
+                    // ✅ 确保向量是Float32Array类型
+                    const vector = data.vector instanceof Float32Array
+                        ? data.vector
+                        : new Float32Array(data.vector);
+                    
+                    this.tagIndex.addPoint(vector, i);
                     this.tagToLabel.set(tag, i);
                     this.labelToTag.set(i, tag);
                     successCount++;
                 } catch (error) {
                     console.error(`[TagVectorManager] Failed to add tag "${tag}" at label ${i}:`, error.message);
+                    console.error(`[TagVectorManager] Vector type: ${data.vector?.constructor?.name}, length: ${data.vector?.length}`);
                     // 继续处理其他tags
                 }
             }
