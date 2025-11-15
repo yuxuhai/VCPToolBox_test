@@ -353,12 +353,13 @@ class VectorDBManager {
     async calculateChanges(diaryName) {
         const diaryPath = path.join(DIARY_ROOT_PATH, diaryName);
         
-        // ✅ 再次检查（防御性编程）
+        // ✅ 再次检查（防御性编程）- 处理所有访问错误
         try {
             await fs.access(diaryPath);
         } catch (error) {
-            if (error.code === 'ENOENT') {
-                console.log(`[VectorDB][calculateChanges] Directory "${diaryName}" does not exist.`);
+            // ✅ 修复：处理所有可能的目录不存在/无权限错误
+            if (error.code === 'ENOENT' || error.code === 'EPERM' || error.code === 'EACCES') {
+                console.log(`[VectorDB][calculateChanges] Directory "${diaryName}" is not accessible (${error.code}). Treating as deleted.`);
                 return { diaryName, chunksToAdd: [], labelsToDelete: [], newFileHashes: {} };
             }
             throw error;
@@ -826,11 +827,29 @@ class VectorDBManager {
             // 设置新的定时器（500ms 防抖）
             const startTime = Date.now();
             console.log(`[VectorDB] Setting debounce timer for "${diaryName}" (500ms)`);
-            const timeoutId = setTimeout(() => {
-                pendingChanges.delete(diaryName);
-                console.log(`[VectorDB] Debounce completed for "${diaryName}", starting processing`);
-                this.scheduleDiaryBookProcessing(diaryName);
-                this.cacheDiaryNameVectors();
+            const timeoutId = setTimeout(async () => {
+                // ✅ 修复：在执行前再次检查目录是否存在
+                const diaryPath = path.join(DIARY_ROOT_PATH, diaryName);
+                try {
+                    await fs.access(diaryPath);
+                    // 目录存在，正常处理
+                    pendingChanges.delete(diaryName);
+                    console.log(`[VectorDB] Debounce completed for "${diaryName}", starting processing`);
+                    this.scheduleDiaryBookProcessing(diaryName);
+                    this.cacheDiaryNameVectors();
+                } catch (error) {
+                    // ✅ 目录已被删除，取消处理并清理资源
+                    if (error.code === 'ENOENT' || error.code === 'EPERM' || error.code === 'EACCES') {
+                        pendingChanges.delete(diaryName);
+                        console.log(`[VectorDB] Directory "${diaryName}" no longer exists after debounce. Cleaning up...`);
+                        this.cleanupDeletedDiary(diaryName).catch(err => {
+                            console.error(`[VectorDB] Error cleaning up "${diaryName}":`, err);
+                        });
+                        this.cacheDiaryNameVectors();
+                    } else {
+                        console.error(`[VectorDB] Unexpected error checking directory "${diaryName}":`, error);
+                    }
+                }
             }, 500);
 
             pendingChanges.set(diaryName, { timeoutId, startTime });
