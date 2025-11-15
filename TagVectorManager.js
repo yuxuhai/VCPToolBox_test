@@ -80,13 +80,27 @@ class TagVectorManager {
         const tagIndexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
         const tagDataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
 
+        let libraryExists = false;
         try {
             await this.loadGlobalTagLibrary(tagIndexPath, tagDataPath);
             console.log('[TagVectorManager] ✅ Loaded existing library');
+            libraryExists = true;
         } catch (e) {
-            console.log('[TagVectorManager] Building from scratch...');
+            console.log('[TagVectorManager] No existing library found, building from scratch...');
             await this.buildGlobalTagLibrary();
             await this.saveGlobalTagLibrary(tagIndexPath, tagDataPath);
+        }
+
+        // ✅ 关键修复：即使库存在，也要检查是否有新增Tag
+        if (libraryExists) {
+            console.log('[TagVectorManager] 🔍 Checking for new tags...');
+            const hasNewTags = await this.incrementalUpdate();
+            if (hasNewTags) {
+                await this.saveGlobalTagLibrary(tagIndexPath, tagDataPath);
+                console.log('[TagVectorManager] ✅ Incremental update completed');
+            } else {
+                console.log('[TagVectorManager] No new tags detected');
+            }
         }
 
         this.startFileWatcher();
@@ -445,6 +459,98 @@ class TagVectorManager {
             const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
             const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
             await this.saveGlobalTagLibrary(indexPath, dataPath);
+        }
+    }
+
+    /**
+     * 🌟 增量更新：检测新增/删除/黑名单变动
+     * @returns {boolean} - 是否有变化
+     */
+    async incrementalUpdate() {
+        console.log('[TagVectorManager] Starting incremental update...');
+        
+        // Step 1: 扫描当前所有Tags
+        const currentStats = await this.scanAllDiaryTags();
+        const currentTags = new Set(this.globalTags.keys());
+        
+        // Step 2: 应用过滤规则（包括黑名单）
+        this.applyTagFilters(currentStats);
+        const filteredCurrentTags = new Set(this.globalTags.keys());
+        
+        // Step 3: 检测变化
+        const tagsToAdd = [];
+        const tagsToRemove = [];
+        
+        // 检测新增的Tags
+        for (const tag of filteredCurrentTags) {
+            if (!currentTags.has(tag)) {
+                tagsToAdd.push(tag);
+            }
+        }
+        
+        // 检测需要删除的Tags（文件删除或被黑名单过滤）
+        for (const tag of currentTags) {
+            if (!filteredCurrentTags.has(tag)) {
+                tagsToRemove.push(tag);
+            }
+        }
+        
+        if (tagsToAdd.length === 0 && tagsToRemove.length === 0) {
+            return false;
+        }
+        
+        console.log(`[TagVectorManager] Changes detected:`);
+        console.log(`  - Tags to add: ${tagsToAdd.length}`);
+        console.log(`  - Tags to remove: ${tagsToRemove.length}`);
+        
+        // Step 4: 删除过期Tags
+        for (const tag of tagsToRemove) {
+            this.globalTags.delete(tag);
+            this.debugLog(`Removed tag: "${tag}"`);
+        }
+        
+        // Step 5: 向量化新增Tags
+        if (tagsToAdd.length > 0) {
+            console.log(`[TagVectorManager] Vectorizing ${tagsToAdd.length} new tags...`);
+            await this.vectorizeTagBatch(tagsToAdd);
+        }
+        
+        // Step 6: 重建索引
+        if (this.globalTags.size > 0) {
+            console.log('[TagVectorManager] Rebuilding HNSW index...');
+            this.buildHNSWIndex();
+        }
+        
+        return true;
+    }
+
+    /**
+     * 批量向量化指定的Tags（带进度显示）
+     */
+    async vectorizeTagBatch(tags) {
+        const batchSize = this.config.tagBatchSize;
+        
+        for (let i = 0; i < tags.length; i += batchSize) {
+            const batch = tags.slice(i, i + batchSize);
+            const progress = ((i / tags.length) * 100).toFixed(1);
+            
+            if (tags.length > batchSize) {
+                console.log(`[TagVectorManager] Vectorizing progress: ${progress}% (${i}/${tags.length})`);
+            }
+            
+            try {
+                const vectors = await this.embeddingFunction(batch);
+                
+                for (let j = 0; j < batch.length; j++) {
+                    const tagData = this.globalTags.get(batch[j]);
+                    if (tagData) {
+                        tagData.vector = vectors[j];
+                    }
+                }
+            } catch (error) {
+                console.error(`[TagVectorManager] Failed to vectorize batch:`, error.message);
+                // 继续处理下一批，避免全部失败
+            }
         }
     }
 
