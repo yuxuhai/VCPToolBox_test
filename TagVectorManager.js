@@ -394,7 +394,7 @@ class TagVectorManager {
     }
 
     /**
-     * 保存到磁盘（分离向量和元数据，避免单个JSON过大）
+     * 保存到磁盘（分片存储，每个文件最多4000个tag）
      */
     async saveGlobalTagLibrary(indexPath, dataPath) {
         if (this.tagIndex) {
@@ -403,9 +403,9 @@ class TagVectorManager {
 
         // ✅ 分离保存：元数据和向量数据分开
         const metaPath = dataPath.replace('.json', '_meta.json');
-        const vectorPath = dataPath.replace('.json', '_vectors.json');
+        const vectorBasePath = dataPath.replace('.json', '_vectors');
         
-        // 1. 保存轻量级元数据（tag -> frequency, diaries, hasVector标志）
+        // 1. 保存轻量级元数据（tag -> frequency, diaries, hasVector标志, shardIndex）
         const metaData = {};
         for (const [tag, data] of this.globalTags.entries()) {
             metaData[tag] = {
@@ -416,66 +416,135 @@ class TagVectorManager {
         }
         await fs.writeFile(metaPath, JSON.stringify(metaData, null, 2), 'utf-8');
         
-        // 2. 只保存有向量的tags（压缩存储）
-        const vectorData = {};
-        for (const [tag, data] of this.globalTags.entries()) {
-            if (data.vector !== null) {
-                vectorData[tag] = Array.from(data.vector);
-            }
-        }
-        await fs.writeFile(vectorPath, JSON.stringify(vectorData), 'utf-8'); // 不格式化，减少文件大小
+        // 2. 分片保存向量数据（每片4000个tag）
+        const SHARD_SIZE = 4000;
+        const tagsWithVectors = Array.from(this.globalTags.entries())
+            .filter(([_, data]) => data.vector !== null);
         
-        console.log(`[TagVectorManager] Saved: ${Object.keys(metaData).length} tags metadata, ${Object.keys(vectorData).length} vectors`);
+        const shardCount = Math.ceil(tagsWithVectors.length / SHARD_SIZE);
+        
+        // 删除旧的shard文件
+        try {
+            const files = await fs.readdir(path.dirname(vectorBasePath));
+            for (const file of files) {
+                if (file.startsWith(path.basename(vectorBasePath)) && file.endsWith('.json')) {
+                    await fs.unlink(path.join(path.dirname(vectorBasePath), file));
+                }
+            }
+        } catch (e) {
+            // 忽略删除错误
+        }
+        
+        // 写入新的shard文件
+        for (let i = 0; i < shardCount; i++) {
+            const start = i * SHARD_SIZE;
+            const end = Math.min(start + SHARD_SIZE, tagsWithVectors.length);
+            const shardTags = tagsWithVectors.slice(start, end);
+            
+            const shardData = {};
+            for (const [tag, data] of shardTags) {
+                shardData[tag] = Array.from(data.vector);
+            }
+            
+            const shardPath = `${vectorBasePath}_${i + 1}.json`;
+            await fs.writeFile(shardPath, JSON.stringify(shardData), 'utf-8');
+            console.log(`[TagVectorManager] Saved shard ${i + 1}/${shardCount}: ${Object.keys(shardData).length} vectors`);
+        }
+        
+        console.log(`[TagVectorManager] Saved: ${Object.keys(metaData).length} tags metadata in ${shardCount} shard(s)`);
     }
 
     /**
-     * 从磁盘加载（支持新旧格式）
+     * 从磁盘加载（支持分片格式和旧格式）
      */
     async loadGlobalTagLibrary(indexPath, dataPath) {
         const metaPath = dataPath.replace('.json', '_meta.json');
-        const vectorPath = dataPath.replace('.json', '_vectors.json');
+        const vectorBasePath = dataPath.replace('.json', '_vectors');
         
         this.globalTags.clear();
         
-        // ✅ 尝试加载新格式（分离文件）
+        // ✅ 尝试加载新格式（分片文件）
         try {
             await fs.access(metaPath);
-            await fs.access(vectorPath);
             
             // 加载元数据
             const metaContent = await fs.readFile(metaPath, 'utf-8');
             const metaData = JSON.parse(metaContent);
             
-            // 加载向量数据
-            const vectorContent = await fs.readFile(vectorPath, 'utf-8');
-            const vectorData = JSON.parse(vectorContent);
+            // 查找所有shard文件
+            const dirPath = path.dirname(vectorBasePath);
+            const baseFileName = path.basename(vectorBasePath);
+            const files = await fs.readdir(dirPath);
+            const shardFiles = files
+                .filter(f => f.startsWith(baseFileName) && f.endsWith('.json'))
+                .sort((a, b) => {
+                    const numA = parseInt(a.match(/_(\d+)\.json$/)?.[1] || '0');
+                    const numB = parseInt(b.match(/_(\d+)\.json$/)?.[1] || '0');
+                    return numA - numB;
+                });
+            
+            console.log(`[TagVectorManager] Found ${shardFiles.length} shard file(s)`);
+            
+            // 合并所有shard的向量数据
+            const allVectorData = {};
+            for (const shardFile of shardFiles) {
+                const shardPath = path.join(dirPath, shardFile);
+                const shardContent = await fs.readFile(shardPath, 'utf-8');
+                const shardData = JSON.parse(shardContent);
+                Object.assign(allVectorData, shardData);
+                console.log(`[TagVectorManager] Loaded shard: ${shardFile} (${Object.keys(shardData).length} vectors)`);
+            }
             
             // 合并数据
             for (const [tag, meta] of Object.entries(metaData)) {
                 this.globalTags.set(tag, {
-                    vector: meta.hasVector && vectorData[tag] ? new Float32Array(vectorData[tag]) : null,
+                    vector: meta.hasVector && allVectorData[tag] ? new Float32Array(allVectorData[tag]) : null,
                     frequency: meta.frequency,
                     diaries: new Set(meta.diaries)
                 });
             }
             
-            console.log(`[TagVectorManager] Loaded from split files: ${Object.keys(metaData).length} tags, ${Object.keys(vectorData).length} vectors`);
+            console.log(`[TagVectorManager] Loaded from sharded files: ${Object.keys(metaData).length} tags, ${Object.keys(allVectorData).length} vectors`);
             
         } catch (e) {
-            // ✅ 回退到旧格式（单个JSON文件）
-            console.log(`[TagVectorManager] Split files not found, trying legacy format...`);
-            const content = await fs.readFile(dataPath, 'utf-8');
-            const tagData = JSON.parse(content);
-
-            for (const [tag, data] of Object.entries(tagData)) {
-                this.globalTags.set(tag, {
-                    vector: data.vector ? new Float32Array(data.vector) : null,
-                    frequency: data.frequency,
-                    diaries: new Set(data.diaries)
-                });
-            }
+            // ✅ 回退到旧格式
+            console.log(`[TagVectorManager] Sharded files not found, trying legacy format...`);
             
-            console.log(`[TagVectorManager] Loaded from legacy file: ${Object.keys(tagData).length} tags`);
+            try {
+                // 尝试单文件格式
+                const vectorPath = dataPath.replace('.json', '_vectors.json');
+                await fs.access(vectorPath);
+                
+                const metaContent = await fs.readFile(metaPath, 'utf-8');
+                const metaData = JSON.parse(metaContent);
+                
+                const vectorContent = await fs.readFile(vectorPath, 'utf-8');
+                const vectorData = JSON.parse(vectorContent);
+                
+                for (const [tag, meta] of Object.entries(metaData)) {
+                    this.globalTags.set(tag, {
+                        vector: meta.hasVector && vectorData[tag] ? new Float32Array(vectorData[tag]) : null,
+                        frequency: meta.frequency,
+                        diaries: new Set(meta.diaries)
+                    });
+                }
+                
+                console.log(`[TagVectorManager] Loaded from single vector file: ${Object.keys(metaData).length} tags`);
+            } catch (e2) {
+                // 最后尝试完全旧格式
+                const content = await fs.readFile(dataPath, 'utf-8');
+                const tagData = JSON.parse(content);
+
+                for (const [tag, data] of Object.entries(tagData)) {
+                    this.globalTags.set(tag, {
+                        vector: data.vector ? new Float32Array(data.vector) : null,
+                        frequency: data.frequency,
+                        diaries: new Set(data.diaries)
+                    });
+                }
+                
+                console.log(`[TagVectorManager] Loaded from legacy file: ${Object.keys(tagData).length} tags`);
+            }
         }
 
         const tagsWithVectors = Array.from(this.globalTags.entries())
