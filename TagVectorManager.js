@@ -265,28 +265,83 @@ class TagVectorManager {
     }
 
     /**
-     * 构建HNSW索引
+     * 构建HNSW索引（带完整错误处理和验证）
      */
     buildHNSWIndex() {
-        const tagsWithVectors = Array.from(this.globalTags.entries())
-            .filter(([_, data]) => data.vector !== null);
+        try {
+            const tagsWithVectors = Array.from(this.globalTags.entries())
+                .filter(([_, data]) => data.vector !== null);
 
-        if (tagsWithVectors.length === 0) {
-            throw new Error('No vectorized tags');
-        }
+            if (tagsWithVectors.length === 0) {
+                throw new Error('No vectorized tags available for index building');
+            }
 
-        const dimensions = tagsWithVectors[0][1].vector.length;
-        this.tagIndex = new HierarchicalNSW('l2', dimensions);
-        this.tagIndex.initIndex(tagsWithVectors.length);
+            console.log(`[TagVectorManager] Building HNSW index for ${tagsWithVectors.length} tags...`);
 
-        this.tagToLabel.clear();
-        this.labelToTag.clear();
+            // ✅ 验证向量完整性
+            const invalidVectors = [];
+            for (let i = 0; i < tagsWithVectors.length; i++) {
+                const [tag, data] = tagsWithVectors[i];
+                if (!data.vector || !Array.isArray(data.vector) && !(data.vector instanceof Float32Array)) {
+                    invalidVectors.push(tag);
+                }
+            }
 
-        for (let i = 0; i < tagsWithVectors.length; i++) {
-            const [tag, data] = tagsWithVectors[i];
-            this.tagIndex.addPoint(data.vector, i);
-            this.tagToLabel.set(tag, i);
-            this.labelToTag.set(i, tag);
+            if (invalidVectors.length > 0) {
+                console.error(`[TagVectorManager] Found ${invalidVectors.length} tags with invalid vectors:`, invalidVectors.slice(0, 5));
+                throw new Error(`${invalidVectors.length} tags have invalid vectors`);
+            }
+
+            // ✅ 验证向量维度一致性
+            const dimensions = tagsWithVectors[0][1].vector.length;
+            for (let i = 1; i < Math.min(10, tagsWithVectors.length); i++) {
+                const vecLen = tagsWithVectors[i][1].vector.length;
+                if (vecLen !== dimensions) {
+                    throw new Error(`Dimension mismatch: expected ${dimensions}, got ${vecLen} at tag "${tagsWithVectors[i][0]}"`);
+                }
+            }
+
+            console.log(`[TagVectorManager] All vectors validated (dimensions=${dimensions})`);
+
+            // ✅ 创建索引（容量预留缓冲）
+            this.tagIndex = new HierarchicalNSW('l2', dimensions);
+            const capacity = Math.ceil(tagsWithVectors.length * 1.2); // 20%缓冲
+            this.tagIndex.initIndex(capacity);
+            console.log(`[TagVectorManager] Index initialized with capacity: ${capacity}`);
+
+            this.tagToLabel.clear();
+            this.labelToTag.clear();
+
+            // ✅ 批量添加向量（带错误恢复）
+            let successCount = 0;
+            for (let i = 0; i < tagsWithVectors.length; i++) {
+                const [tag, data] = tagsWithVectors[i];
+                try {
+                    this.tagIndex.addPoint(data.vector, i);
+                    this.tagToLabel.set(tag, i);
+                    this.labelToTag.set(i, tag);
+                    successCount++;
+                } catch (error) {
+                    console.error(`[TagVectorManager] Failed to add tag "${tag}" at label ${i}:`, error.message);
+                    // 继续处理其他tags
+                }
+            }
+
+            console.log(`[TagVectorManager] ✅ Index built successfully: ${successCount}/${tagsWithVectors.length} tags added`);
+
+            if (successCount === 0) {
+                throw new Error('Failed to add any tags to index');
+            }
+
+        } catch (error) {
+            console.error(`[TagVectorManager] buildHNSWIndex failed:`, error);
+            console.error(`[TagVectorManager] Error details:`, {
+                message: error.message,
+                stack: error.stack,
+                totalTags: this.globalTags.size,
+                vectorizedCount: Array.from(this.globalTags.values()).filter(d => d.vector !== null).length
+            });
+            throw error;
         }
     }
 
@@ -469,15 +524,25 @@ class TagVectorManager {
     async incrementalUpdate() {
         console.log('[TagVectorManager] Starting incremental update...');
         
-        // Step 1: 保存旧的tags（已向量化的）
-        const oldTags = new Set(this.globalTags.keys());
+        // Step 1: 保存旧的tags（已向量化的）+ 深拷贝向量数据
+        const oldGlobalTags = new Map();
+        for (const [tag, data] of this.globalTags.entries()) {
+            oldGlobalTags.set(tag, {
+                vector: data.vector,  // ✅ 保留原始向量引用
+                frequency: data.frequency,
+                diaries: new Set(data.diaries)
+            });
+        }
+        
         const oldVectorizedTags = new Set(
-            Array.from(this.globalTags.entries())
+            Array.from(oldGlobalTags.entries())
                 .filter(([_, data]) => data.vector !== null)
                 .map(([tag, _]) => tag)
         );
         
-        // Step 2: 重新扫描所有Tags
+        console.log(`[TagVectorManager] Saved ${oldVectorizedTags.size} vectorized tags before rescan`);
+        
+        // Step 2: 重新扫描所有Tags（会清空this.globalTags）
         const currentStats = await this.scanAllDiaryTags();
         console.log(`[TagVectorManager] Scanned ${currentStats.totalFiles} files, found ${currentStats.uniqueTags} unique tags`);
         
@@ -490,18 +555,31 @@ class TagVectorManager {
         const tagsToAdd = [];
         const tagsToRemove = [];
         
-        // 检测新增的Tags（在新扫描中出现，但在旧tags中不存在）
+        // Step 3.1: 恢复旧tags的向量数据
         for (const tag of newTags) {
-            if (!oldTags.has(tag)) {
+            if (oldGlobalTags.has(tag)) {
+                const oldData = oldGlobalTags.get(tag);
+                const newData = this.globalTags.get(tag);
+                if (oldData.vector !== null && newData) {
+                    // ✅ 恢复已有的向量
+                    newData.vector = oldData.vector;
+                }
+            }
+        }
+        
+        // Step 3.2: 检测新增的Tags（在新扫描中出现，但在旧tags中不存在或未向量化）
+        for (const tag of newTags) {
+            if (!oldGlobalTags.has(tag)) {
+                // 完全新的tag
                 tagsToAdd.push(tag);
             } else if (!oldVectorizedTags.has(tag)) {
-                // 旧tag存在但未向量化，也需要向量化
+                // 旧tag存在但未向量化
                 tagsToAdd.push(tag);
             }
         }
         
-        // 检测需要删除的Tags（在旧tags中存在，但新扫描中不存在）
-        for (const tag of oldTags) {
+        // Step 3.3: 检测需要删除的Tags（在旧tags中存在，但新扫描中不存在）
+        for (const tag of oldGlobalTags.keys()) {
             if (!newTags.has(tag)) {
                 tagsToRemove.push(tag);
             }
