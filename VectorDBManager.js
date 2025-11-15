@@ -360,7 +360,14 @@ class VectorDBManager {
             // ✅ 修复：处理所有可能的目录不存在/无权限错误
             if (error.code === 'ENOENT' || error.code === 'EPERM' || error.code === 'EACCES') {
                 console.log(`[VectorDB][calculateChanges] Directory "${diaryName}" is not accessible (${error.code}). Treating as deleted.`);
-                return { diaryName, chunksToAdd: [], labelsToDelete: [], newFileHashes: {} };
+                // ✅ 返回特殊标记，表示目录已删除
+                return {
+                    diaryName,
+                    chunksToAdd: [],
+                    labelsToDelete: [],
+                    newFileHashes: {},
+                    directoryDeleted: true  // ✅ 添加标记
+                };
             }
             throw error;
         }
@@ -535,7 +542,14 @@ class VectorDBManager {
 
             console.log(`[VectorDB] Calculating changes for "${diaryName}"...`);
             const changeset = await this.calculateChanges(diaryName);
-            const { chunksToAdd, labelsToDelete, forceFullRebuild } = changeset;
+            const { chunksToAdd, labelsToDelete, forceFullRebuild, directoryDeleted } = changeset;
+
+            // ✅ 新增：检查目录是否已被删除
+            if (directoryDeleted) {
+                console.log(`[VectorDB] Directory "${diaryName}" was deleted during processing. Cleaning up...`);
+                await this.cleanupDeletedDiary(diaryName);
+                return;
+            }
 
             if (forceFullRebuild) {
                 console.log(`[VectorDB] Full rebuild forced for "${diaryName}" due to data integrity issues.`);
