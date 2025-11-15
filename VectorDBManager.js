@@ -711,30 +711,51 @@ class VectorDBManager {
     }
 
     /**
-     * ✅ 通用原子写入方法（Windows 兼容）
+     * ✅ 通用原子写入方法（Windows 兼容 + 防并发冲突）
      */
     async atomicWriteFile(filePath, data) {
-        const tempPath = `${filePath}.tmp`;
+        // ✅ 使用时间戳+随机数避免并发冲突
+        const timestamp = Date.now();
+        const random = Math.random().toString(36).substring(2, 8);
+        const tempPath = `${filePath}.tmp.${timestamp}.${random}`;
+        
         try {
             // ✅ 确保父目录存在
             const dir = path.dirname(filePath);
             await fs.mkdir(dir, { recursive: true });
             
+            // 写入临时文件
             await fs.writeFile(tempPath, data);
             
-            // ✅ Windows 兼容：如果目标文件存在，先删除再重命名
-            // 在 Windows 上，fs.rename() 不能覆盖现有文件
+            // 验证写入成功
+            if (!await this.fileExists(tempPath)) {
+                throw new Error(`Failed to create temp file: ${tempPath}`);
+            }
+            
+            const stats = await fs.stat(tempPath);
+            if (stats.size === 0 && data.length > 0) {
+                throw new Error(`Temp file is empty: ${tempPath}`);
+            }
+            
+            // ✅ Windows 兼容：先删除再重命名
             try {
                 await fs.unlink(filePath);
             } catch (e) {
-                // 文件不存在是正常情况，忽略 ENOENT 错误
                 if (e.code !== 'ENOENT') {
                     throw e;
                 }
             }
             
+            // 重命名临时文件
             await fs.rename(tempPath, filePath);
+            
+            // 验证最终文件存在
+            if (!await this.fileExists(filePath)) {
+                throw new Error(`Final file was not created: ${filePath}`);
+            }
+            
             this.debugLog(`Atomically wrote to ${path.basename(filePath)}`);
+            
         } catch (error) {
             console.error(`[VectorDB] Failed to write ${filePath}:`, {
                 path: tempPath,
@@ -742,12 +763,14 @@ class VectorDBManager {
                 error: error.message,
                 code: error.code
             });
+            
             // 清理临时文件
             try {
                 if (await this.fileExists(tempPath)) {
                     await fs.unlink(tempPath);
                 }
             } catch (e) { /* ignore */ }
+            
             throw error;
         }
     }
@@ -1408,16 +1431,25 @@ class VectorDBManager {
     }
 
     async trackUsage(diaryName) {
-        let stats = await this.loadUsageStats();
-        if (!stats[diaryName]) {
-            stats[diaryName] = { frequency: 0, lastAccessed: null };
-        }
-        stats[diaryName].frequency++;
-        stats[diaryName].lastAccessed = Date.now();
+        // ✅ 使用锁防止并发写入冲突
+        const lockKey = `usage_stats`;
+        
         try {
+            await this.acquireLock(lockKey);
+            
+            let stats = await this.loadUsageStats();
+            if (!stats[diaryName]) {
+                stats[diaryName] = { frequency: 0, lastAccessed: null };
+            }
+            stats[diaryName].frequency++;
+            stats[diaryName].lastAccessed = Date.now();
+            
             await this.atomicWriteFile(USAGE_STATS_PATH, JSON.stringify(stats, null, 2));
+            
         } catch (e) {
             console.warn('[VectorDB] Failed to save usage stats:', e.message);
+        } finally {
+            this.releaseLock(lockKey);
         }
     }
 
