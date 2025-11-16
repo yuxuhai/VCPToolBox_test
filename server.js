@@ -530,15 +530,42 @@ app.post('/v1/interrupt', (req, res) => {
                     try {
                         // 检查响应头是否已发送，决定如何关闭
                         if (!context.res.headersSent) {
-                            // 响应头还没发送，发送标准 JSON 响应
-                            context.res.status(200).json({
-                                choices: [{
-                                    index: 0,
-                                    message: { role: 'assistant', content: '请求已被用户中止' },
-                                    finish_reason: 'stop'
-                                }]
-                            });
-                            console.log(`[Interrupt] Sent JSON abort response for ID: ${id}`);
+                            // 修复竞态条件Bug: 根据原始请求的stream属性判断响应类型
+                            const isStreamRequest = context.req?.body?.stream === true;
+                            
+                            if (isStreamRequest) {
+                                // 流式请求：发送SSE格式的中止信号
+                                console.log(`[Interrupt] Sending SSE abort signal for stream request ${id}`);
+                                context.res.status(200);
+                                context.res.setHeader('Content-Type', 'text/event-stream');
+                                context.res.setHeader('Cache-Control', 'no-cache');
+                                context.res.setHeader('Connection', 'keep-alive');
+                                
+                                const abortChunk = {
+                                    id: `chatcmpl-interrupt-${Date.now()}`,
+                                    object: 'chat.completion.chunk',
+                                    created: Math.floor(Date.now() / 1000),
+                                    model: context.req?.body?.model || 'unknown',
+                                    choices: [{
+                                        index: 0,
+                                        delta: { content: '请求已被用户中止' },
+                                        finish_reason: 'stop'
+                                    }]
+                                };
+                                context.res.write(`data: ${JSON.stringify(abortChunk)}\n\n`);
+                                context.res.write('data: [DONE]\n\n');
+                                context.res.end();
+                            } else {
+                                // 非流式请求：发送标准JSON响应
+                                console.log(`[Interrupt] Sending JSON abort response for non-stream request ${id}`);
+                                context.res.status(200).json({
+                                    choices: [{
+                                        index: 0,
+                                        message: { role: 'assistant', content: '请求已被用户中止' },
+                                        finish_reason: 'stop'
+                                    }]
+                                });
+                            }
                         } else if (context.res.getHeader('Content-Type')?.includes('text/event-stream')) {
                             // 是流式响应，发送 [DONE] 信号并关闭
                             context.res.write('data: [DONE]\n\n');
