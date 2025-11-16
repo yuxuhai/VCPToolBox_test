@@ -1775,7 +1775,7 @@ class VectorDBManager {
             return await this.search(diaryName, queryVector, k);
         }
 
-        console.log(`[VectorDB][TagSearch] Starting Tag-enhanced vector search for "${diaryName}" (α=${tagWeight})`);
+        // Tag增强搜索开始（静默）
 
         try {
             // Step 1: Tag层 - 获取语义相关的tags及其向量
@@ -1785,7 +1785,7 @@ class VectorDBManager {
             const scaledTagCount = k * 10;  // 根据k值动态缩放
             const topTagCount = Math.min(Math.max(baseTagCount, scaledTagCount), 100);  // 上限100
             
-            console.log(`[VectorDB][TagSearch] Recalling ${topTagCount} tags for network search (k=${k})`);
+            // Tag召回（静默）
             const matchedTags = await this.tagVectorManager.searchSimilarTags(queryVector, topTagCount);
             
             if (matchedTags.length === 0) {
@@ -1793,8 +1793,7 @@ class VectorDBManager {
                 return await this.search(diaryName, queryVector, k);
             }
 
-            console.log(`[VectorDB][TagSearch] Matched ${matchedTags.length} tags:`,
-                matchedTags.slice(0, 5).map(t => `${t.tag}(${t.score.toFixed(3)})`).join(', '));
+            // 匹配到tags（静默）
 
             // 🌟 Step 1.5: Tag图扩展 - 使用共现网络扩展相关tags
             let expandedTags = matchedTags;
@@ -1804,12 +1803,11 @@ class VectorDBManager {
                     const maxExpansion = parseInt(process.env.TAG_EXPAND_MAX_COUNT) || 30;
                     const minWeight = parseInt(process.env.TAG_EXPAND_MIN_WEIGHT) || 2;
                     
-                    console.log(`[VectorDB][TagSearch] Expanding ${seedTags.length} seed tags via co-occurrence graph (max: ${maxExpansion})...`);
+                    // Tag图扩展（静默）
                     const graphExpanded = await this.tagExpander.expandTags(seedTags, maxExpansion);
                     
                     if (graphExpanded.length > 0) {
-                        console.log(`[VectorDB][TagSearch] Graph expansion found ${graphExpanded.length} related tags:`,
-                            graphExpanded.slice(0, 5).map(t => `${t.tag}(w:${t.weight})`).join(', '));
+                        // 图扩展找到相关tags（静默）
                         
                         // 🌟 合并向量匹配的tags和图扩展的tags
                         // 过滤掉权重过低的扩展tags
@@ -1834,7 +1832,7 @@ class VectorDBManager {
                             }
                         }
                         
-                        console.log(`[VectorDB][TagSearch] Added ${expandedWithVectors.length} graph-expanded tags with vectors`);
+                        // 已添加图扩展tags（静默）
                         
                         // 合并原始匹配tags和扩展tags（去重）
                         const allTagsMap = new Map();
@@ -1846,9 +1844,9 @@ class VectorDBManager {
                         });
                         
                         expandedTags = Array.from(allTagsMap.values());
-                        console.log(`[VectorDB][TagSearch] Total tags after expansion: ${expandedTags.length} (${matchedTags.length} vector + ${expandedWithVectors.length} graph)`);
+                        // Tag扩展完成（静默）
                     } else {
-                        console.log(`[VectorDB][TagSearch] No additional tags from graph expansion`);
+                        // 无额外扩展（静默）
                     }
                 } catch (expandError) {
                     console.error(`[VectorDB][TagSearch] Graph expansion failed:`, expandError.message);
@@ -1874,7 +1872,7 @@ class VectorDBManager {
                 return await this.search(diaryName, queryVector, k);
             }
 
-            console.log(`[VectorDB][TagSearch] Using ${tagVectors.length} tag vectors for fusion (${expandedTags.length} total tags)`);
+            // Tag向量融合（静默）
 
             // 计算tag向量的加权平均
             const dimensions = queryVector.length;
@@ -1902,13 +1900,12 @@ class VectorDBManager {
                 enhancedQueryVector[i] = (1 - tagWeight) * queryVector[i] + tagWeight * avgTagVector[i];
             }
 
-            console.log(`[VectorDB][TagSearch] Query vector enhanced with ${tagVectors.length} tag vectors (α=${tagWeight})`);
+            // 查询向量已增强（静默）
 
             // Step 3: 使用增强后的向量搜索
             const searchResults = await this.search(diaryName, enhancedQueryVector, k);
 
-            console.log(`[VectorDB][TagSearch] Tag-enhanced search completed in ${(performance.now() - startTime).toFixed(2)}ms`);
-            console.log(`[VectorDB][TagSearch] Found ${searchResults.length} results with tag semantic boost`);
+            console.log(`[VectorDB][TagSearch] Tag增强搜索完成: ${searchResults.length}条结果 (${(performance.now() - startTime).toFixed(0)}ms, ${expandedTags.length}tags)`);
 
             // ✅ 在结果中附加tag信息（包含图扩展信息）
             const enhancedResults = searchResults.map(result => {
