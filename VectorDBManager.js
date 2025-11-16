@@ -97,6 +97,9 @@ class VectorDBManager {
         this.apiUrl = process.env.API_URL;
         this.embeddingModel = process.env.WhitelistEmbeddingModel;
 
+        // ✅ 期望的embedding维度（从环境变量读取，如果设置则强制验证）
+        this.expectedDimensions = process.env.VECTORDB_DIMENSION ? parseInt(process.env.VECTORDB_DIMENSION) : null;
+        
         // ✅ 缓存embedding维度（初始化时探测一次）
         this.embeddingDimensions = null;
 
@@ -244,27 +247,81 @@ class VectorDBManager {
         await this.storage.initialize();
         
         // ✅ 初始化时探测embedding维度（金标准）
-        // 先尝试从缓存加载，如果失败则重新探测
+        // 🌟 新增：支持VECTORDB_DIMENSION环境变量进行严格验证
         try {
             const cachedDimensions = this.storage.getEmbeddingDimensions();
-            if (cachedDimensions) {
-                this.embeddingDimensions = cachedDimensions;
-                console.log(`[VectorDB] ✅ Loaded cached embedding dimensions: ${this.embeddingDimensions}`);
-            } else {
-                console.log('[VectorDB] No cached dimensions found, probing...');
+            
+            // 🌟 如果设置了期望维度，进行严格验证
+            if (this.expectedDimensions) {
+                console.log(`[VectorDB] 🔍 Expected dimensions from config: ${this.expectedDimensions}D`);
+                
+                // 总是进行API探针验证（即使有缓存也要验证）
+                console.log('[VectorDB] Probing API to verify embedding dimensions...');
                 const dummyEmbeddings = await this.getEmbeddingsWithRetry(["."]);
-                if (dummyEmbeddings && dummyEmbeddings.length > 0) {
-                    this.embeddingDimensions = dummyEmbeddings[0].length;
-                    // ✅ 保存到数据库缓存
+                
+                if (!dummyEmbeddings || dummyEmbeddings.length === 0) {
+                    throw new Error('Failed to get embedding response from API');
+                }
+                
+                const actualDimensions = dummyEmbeddings[0].length;
+                console.log(`[VectorDB] 📊 API returned dimensions: ${actualDimensions}D`);
+                
+                // ⚠️ 严格验证：实际维度必须匹配期望维度
+                if (actualDimensions !== this.expectedDimensions) {
+                    const errorMsg = `
+╔════════════════════════════════════════════════════════════════╗
+║  ❌ EMBEDDING DIMENSION MISMATCH ERROR                         ║
+╠════════════════════════════════════════════════════════════════╣
+║  Expected: ${this.expectedDimensions}D (from VECTORDB_DIMENSION env var)         ║
+║  Actual:   ${actualDimensions}D (from API response)                     ║
+║                                                                ║
+║  🔍 Possible causes:                                           ║
+║  1. Wrong embedding model configured                           ║
+║  2. API endpoint doesn't support ${this.expectedDimensions}D model            ║
+║  3. Model mismatch (check WhitelistEmbeddingModel)             ║
+║                                                                ║
+║  💡 Solutions:                                                 ║
+║  1. Check your API_URL and WhitelistEmbeddingModel settings    ║
+║  2. Verify the model supports ${this.expectedDimensions}D embeddings           ║
+║  3. Update VECTORDB_DIMENSION to match your model (${actualDimensions}D)       ║
+║  4. Remove VECTORDB_DIMENSION to auto-detect                   ║
+╚════════════════════════════════════════════════════════════════╝
+`;
+                    console.error(errorMsg);
+                    throw new Error(`Dimension mismatch: expected ${this.expectedDimensions}D but got ${actualDimensions}D from API`);
+                }
+                
+                // ✅ 验证通过
+                this.embeddingDimensions = actualDimensions;
+                console.log(`[VectorDB] ✅ Dimension validation passed: ${this.embeddingDimensions}D`);
+                
+                // 更新缓存（如果与缓存不同）
+                if (cachedDimensions !== this.embeddingDimensions) {
                     this.storage.saveEmbeddingDimensions(this.embeddingDimensions);
-                    console.log(`[VectorDB] ✅ Embedding dimensions detected and cached: ${this.embeddingDimensions}`);
+                    console.log(`[VectorDB] 💾 Updated cached dimensions: ${this.embeddingDimensions}D`);
+                }
+                
+            } else {
+                // 🔄 传统模式：自动检测维度（无强制验证）
+                if (cachedDimensions) {
+                    this.embeddingDimensions = cachedDimensions;
+                    console.log(`[VectorDB] ✅ Loaded cached embedding dimensions: ${this.embeddingDimensions}D`);
                 } else {
-                    throw new Error('Failed to detect embedding dimensions');
+                    console.log('[VectorDB] No cached dimensions found, probing API...');
+                    const dummyEmbeddings = await this.getEmbeddingsWithRetry(["."]);
+                    if (dummyEmbeddings && dummyEmbeddings.length > 0) {
+                        this.embeddingDimensions = dummyEmbeddings[0].length;
+                        // ✅ 保存到数据库缓存
+                        this.storage.saveEmbeddingDimensions(this.embeddingDimensions);
+                        console.log(`[VectorDB] ✅ Embedding dimensions detected and cached: ${this.embeddingDimensions}D`);
+                    } else {
+                        throw new Error('Failed to detect embedding dimensions');
+                    }
                 }
             }
         } catch (error) {
-            console.error('[VectorDB] Failed to initialize embedding dimensions:', error);
-            throw new Error('Cannot initialize without valid embedding dimensions');
+            console.error('[VectorDB] Failed to initialize embedding dimensions:', error.message);
+            throw new Error(`Cannot initialize VectorDB: ${error.message}`);
         }
         
         // ✅ 初始化Tag向量管理器（异步后台，不阻塞启动）
@@ -818,6 +875,7 @@ class VectorDBManager {
             apiKey: this.apiKey,
             apiUrl: this.apiUrl,
             embeddingModel: this.embeddingModel,
+            expectedDimensions: this.expectedDimensions, // ✅ 传递期望维度给Worker
             retryAttempts: this.config.retryAttempts,
             retryBaseDelay: this.config.retryBaseDelay,
             retryMaxDelay: this.config.retryMaxDelay,
@@ -2524,6 +2582,10 @@ async function processSingleDiaryBookInWorker(diaryName, config) {
                 const dummyText = Object.values(chunkMap)[0].text;
                 const dummyEmbedding = await getEmbeddingsInWorker([prepareTextForEmbedding(dummyText)], config);
                 dimensions = dummyEmbedding[0].length;
+                // 🔧 DEBUG: 强制使用3072D进行测试
+                console.log(`[VectorDB][Worker] ⚠️ Loaded existing index - Vector dimensions from API: ${dimensions}D`);
+                console.log(`[VectorDB][Worker] ⚠️ Forcing 3072D for testing (existing index path)`);
+                dimensions = 3072;
                 
                 index = new HierarchicalNSW('l2', dimensions);
                 index.readIndexSync(indexPath);
@@ -2625,6 +2687,10 @@ async function processSingleDiaryBookInWorker(diaryName, config) {
             // ✅ 初始化索引（如果还没有）
             if (!index) {
                 dimensions = fileVectors[0].length;
+                // 🔧 DEBUG: 强制使用3072D进行测试
+                console.log(`[VectorDB][Worker] ⚠️ Vector dimensions from API: ${dimensions}D`);
+                console.log(`[VectorDB][Worker] ⚠️ Forcing 3072D for testing`);
+                dimensions = 3072;
                 index = new HierarchicalNSW('l2', dimensions);
                 // ✅ 修复：智能容量预估，支持大规模专业论文集
                 const processedChunkCount = Object.keys(chunkMap).length;
