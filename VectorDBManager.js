@@ -464,21 +464,30 @@ class VectorDBManager {
         const newFileHashes = {};
         const oldChunkMap = this.storage.getChunkMap(diaryName);
         
-        const oldChunkHashToLabel = new Map(Object.entries(oldChunkMap).map(([label, data]) => [data.chunkHash, Number(label)]));
-
-        // ✅ 修复：防御性检查, 防止 undefined key 导致 size 异常
-        if (oldChunkHashToLabel.has(undefined)) {
-            oldChunkHashToLabel.delete(undefined);
+        // ✅ 检查数据完整性：收集损坏条目对应的源文件
+        // 让这些损坏文件进入正常的diff流程，由变化率判断是否触发重建
+        const corruptedSourceFiles = new Set();
+        let corruptedCount = 0;
+        
+        for (const [label, data] of Object.entries(oldChunkMap)) {
+            // 检查必需字段是否存在且有效
+            if (!data || !data.text || !data.sourceFile || !data.chunkHash) {
+                corruptedCount++;
+                if (data && data.sourceFile) {
+                    corruptedSourceFiles.add(data.sourceFile);
+                }
+                this.debugLog(`Corrupted entry at label ${label}:`, {
+                    hasText: !!data?.text,
+                    hasSourceFile: !!data?.sourceFile,
+                    hasChunkHash: !!data?.chunkHash
+                });
+            }
         }
-        if (Object.keys(oldChunkMap).length > 0 && oldChunkHashToLabel.size < Object.keys(oldChunkMap).length * 0.9) {
-            console.error(`[VectorDB] Severe data corruption detected in "${diaryName}": ${oldChunkHashToLabel.size} unique hashes vs ${Object.keys(oldChunkMap).length} entries. Forcing full rebuild.`);
-            return {
-                diaryName,
-                chunksToAdd: [],
-                labelsToDelete: [],
-                newFileHashes: {},
-                forceFullRebuild: true
-            };
+        
+        if (corruptedCount > 0) {
+            const totalEntries = Object.keys(oldChunkMap).length;
+            console.warn(`[VectorDB] Found ${corruptedCount}/${totalEntries} corrupted entries in "${diaryName}"`);
+            console.warn(`[VectorDB] Will rebuild ${corruptedSourceFiles.size} affected files through diff: ${Array.from(corruptedSourceFiles).slice(0, 5).join(', ')}${corruptedSourceFiles.size > 5 ? '...' : ''}`);
         }
         // ✅ 修复：基于(sourceFile + chunkIndex)来判断变化，而非hash去重
         // 构建当前文件的chunk列表：file -> chunks[]
@@ -517,7 +526,7 @@ class VectorDBManager {
         const chunksToAdd = [];
         const labelsToDelete = [];
 
-        // ✅ 检测需要删除的：旧文件不再存在，或文件内容变化
+        // ✅ 检测需要删除的：旧文件不再存在，文件内容变化，或文件数据损坏
         for (const [file, oldLabels] of oldFileChunks.entries()) {
             const currentChunks = currentFileChunks.get(file);
             
@@ -527,12 +536,16 @@ class VectorDBManager {
                     labelsToDelete.push(label);
                 }
             } else {
-                // 文件存在，检查文件hash是否变化
+                // 文件存在，检查文件hash是否变化，或者该文件有损坏的数据
                 const oldFileHash = this.storage.getFileHashes(diaryName)[file];
                 const newFileHash = newFileHashes[file];
+                const isCorrupted = corruptedSourceFiles.has(file);
                 
-                if (oldFileHash !== newFileHash) {
-                    // 文件内容变化，删除所有旧chunks（后面会重新添加）
+                if (oldFileHash !== newFileHash || isCorrupted) {
+                    // 文件内容变化或数据损坏，删除所有旧chunks（后面会重新添加）
+                    if (isCorrupted) {
+                        console.log(`[VectorDB] Rebuilding corrupted file "${file}" in "${diaryName}"`);
+                    }
                     for (const label of oldLabels.keys()) {
                         labelsToDelete.push(label);
                     }
@@ -540,13 +553,14 @@ class VectorDBManager {
             }
         }
 
-        // ✅ 检测需要添加的：新文件，或文件内容变化
+        // ✅ 检测需要添加的：新文件，文件内容变化，或文件数据损坏需修复
         for (const [file, currentChunks] of currentFileChunks.entries()) {
             const oldFileHash = this.storage.getFileHashes(diaryName)[file];
             const newFileHash = newFileHashes[file];
+            const isCorrupted = corruptedSourceFiles.has(file);
             
-            if (!oldFileHash || oldFileHash !== newFileHash) {
-                // 新文件或文件内容变化，添加所有chunks
+            if (!oldFileHash || oldFileHash !== newFileHash || isCorrupted) {
+                // 新文件、文件内容变化，或数据损坏需修复，添加所有chunks
                 for (const chunkData of currentChunks) {
                     chunksToAdd.push({
                         text: chunkData.text,
