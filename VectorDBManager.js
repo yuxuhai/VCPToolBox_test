@@ -97,6 +97,9 @@ class VectorDBManager {
         this.apiUrl = process.env.API_URL;
         this.embeddingModel = process.env.WhitelistEmbeddingModel;
 
+        // ✅ 缓存embedding维度（初始化时探测一次）
+        this.embeddingDimensions = null;
+
         this.indices = new Map();
         this.chunkMaps = new Map();
         this.activeWorkers = new Set();
@@ -239,6 +242,30 @@ class VectorDBManager {
         console.log('[VectorDB] Initializing Vector Database Manager...');
         await fs.mkdir(VECTOR_STORE_PATH, { recursive: true });
         await this.storage.initialize();
+        
+        // ✅ 初始化时探测embedding维度（金标准）
+        // 先尝试从缓存加载，如果失败则重新探测
+        try {
+            const cachedDimensions = this.storage.getEmbeddingDimensions();
+            if (cachedDimensions) {
+                this.embeddingDimensions = cachedDimensions;
+                console.log(`[VectorDB] ✅ Loaded cached embedding dimensions: ${this.embeddingDimensions}`);
+            } else {
+                console.log('[VectorDB] No cached dimensions found, probing...');
+                const dummyEmbeddings = await this.getEmbeddingsWithRetry(["."]);
+                if (dummyEmbeddings && dummyEmbeddings.length > 0) {
+                    this.embeddingDimensions = dummyEmbeddings[0].length;
+                    // ✅ 保存到数据库缓存
+                    this.storage.saveEmbeddingDimensions(this.embeddingDimensions);
+                    console.log(`[VectorDB] ✅ Embedding dimensions detected and cached: ${this.embeddingDimensions}`);
+                } else {
+                    throw new Error('Failed to detect embedding dimensions');
+                }
+            }
+        } catch (error) {
+            console.error('[VectorDB] Failed to initialize embedding dimensions:', error);
+            throw new Error('Cannot initialize without valid embedding dimensions');
+        }
         
         // ✅ 初始化Tag向量管理器（异步后台，不阻塞启动）
         if (this.tagRAGSystemEnabled) {
@@ -421,8 +448,8 @@ class VectorDBManager {
         // ✅ 步骤3：检查数据一致性（索引 vs 数据库）
         // ⚠️ 关键优化：根据差异大小决定修复策略
         try {
-            const dimensions = 768;
-            const tempIndex = new HierarchicalNSW('l2', dimensions);
+            // ✅ 使用初始化时缓存的维度（金标准）
+            const tempIndex = new HierarchicalNSW('l2', this.embeddingDimensions);
             tempIndex.readIndexSync(indexPath);
             const indexElementCount = tempIndex.getCurrentCount();
             
@@ -1198,11 +1225,16 @@ class VectorDBManager {
             await fs.access(indexPath);
 
             if (!dimensions) {
-                const dummyEmbeddings = await this.getEmbeddingsWithRetry(["."]);
-                if (!dummyEmbeddings || dummyEmbeddings.length === 0) {
-                    throw new Error("Could not dynamically determine embedding dimensions.");
+                // ✅ 使用缓存的维度（金标准）
+                // 如果内存中丢失，从数据库恢复
+                if (!this.embeddingDimensions) {
+                    this.embeddingDimensions = this.storage.getEmbeddingDimensions();
+                    if (!this.embeddingDimensions) {
+                        throw new Error('Embedding dimensions lost and no cache available');
+                    }
+                    console.warn(`[VectorDB] Recovered embedding dimensions from cache: ${this.embeddingDimensions}`);
                 }
-                dimensions = dummyEmbeddings[0].length;
+                dimensions = this.embeddingDimensions;
             }
 
             const index = new HierarchicalNSW('l2', dimensions);
@@ -2071,24 +2103,10 @@ class VectorDBManager {
             return;
         }
         
-        // ✅ 修复：只探测一次dimensions，避免重复向量化
-        let sharedDimensions = null;
-        try {
-            console.log(`[VectorDB] Probing embedding dimensions...`);
-            const dummyEmbeddings = await this.getEmbeddingsWithRetry(["."]);
-            if (dummyEmbeddings && dummyEmbeddings.length > 0) {
-                sharedDimensions = dummyEmbeddings[0].length;
-                console.log(`[VectorDB] ✅ Detected embedding dimensions: ${sharedDimensions} (single probe for all indices)`);
-            }
-        } catch (error) {
-            console.warn(`[VectorDB] ⚠️ Failed to detect dimensions:`, error.message);
-            console.warn(`[VectorDB] Will skip pre-warming and continue startup`);
-            return; // ✅ 失败时直接返回，不阻塞启动
-        }
-        
+        // ✅ 使用缓存的维度（金标准）
         const preLoadPromises = sortedDiaries
             .slice(0, preLoadCount)
-            .map(diaryName => this.loadIndexForSearch(diaryName, sharedDimensions));
+            .map(diaryName => this.loadIndexForSearch(diaryName, this.embeddingDimensions));
         
         await Promise.all(preLoadPromises);
         console.log(`[VectorDB] Pre-warmed ${preLoadCount} most frequently used indices.`);
