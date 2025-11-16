@@ -26,6 +26,11 @@ class TagVectorManager {
             ? process.env.TAG_BLACKLIST.split(',').map(t => t.trim()).filter(Boolean)
             : [];
         
+        // 🌟 从环境变量读取超级黑名单（强力移除模式）
+        const envBlacklistSuper = process.env.TAG_BLACKLIST_SUPER
+            ? process.env.TAG_BLACKLIST_SUPER.split(',').map(t => t.trim()).filter(Boolean)
+            : [];
+        
         // ✅ 从环境变量读取过滤规则
         const envIgnoreFolders = process.env.TAG_IGNORE_FOLDERS
             ? process.env.TAG_IGNORE_FOLDERS.split(',').map(t => t.trim()).filter(Boolean)
@@ -39,6 +44,7 @@ class TagVectorManager {
             vectorStorePath: config.vectorStorePath || path.join(__dirname, 'VectorStore'),
             tagBatchSize: parseInt(process.env.TAG_VECTORDB_BATCH_SIZE) || 100,
             tagBlacklist: envBlacklist.length > 0 ? envBlacklist : ['今天', '明天', '昨天', '心情', '很', '非常'],
+            tagBlacklistSuper: envBlacklistSuper, // 🌟 超级黑名单
             minTagLength: 2,
             maxTagLength: 50,
             ignorePatterns: envIgnoreFolders,
@@ -115,6 +121,9 @@ class TagVectorManager {
 
         console.log('[TagVectorManager] Initialized with batch size:', this.config.tagBatchSize);
         console.log('[TagVectorManager] Worker mode:', this.config.useWorker ? 'enabled' : 'disabled');
+        if (this.config.tagBlacklistSuper.length > 0) {
+            console.log('[TagVectorManager] 🌟 Super Blacklist enabled:', this.config.tagBlacklistSuper.join(', '));
+        }
     }
     
     /**
@@ -162,7 +171,32 @@ class TagVectorManager {
         return match[1]
             .split(/[,，、]/)
             .map(t => t.trim())
+            .map(t => this.applySuperBlacklist(t)) // 🌟 应用超级黑名单
             .filter(t => this.isValidTag(t));
+    }
+
+    /**
+     * 🌟 应用超级黑名单：移除tag中包含的黑名单关键词
+     * @param {string} tag - 原始tag
+     * @returns {string} - 处理后的tag
+     */
+    applySuperBlacklist(tag) {
+        if (!tag || this.config.tagBlacklistSuper.length === 0) {
+            return tag;
+        }
+        
+        let processedTag = tag;
+        
+        // 对每个超级黑名单关键词进行全局替换
+        for (const keyword of this.config.tagBlacklistSuper) {
+            if (keyword) {
+                // 使用全局替换，移除所有出现的关键词
+                processedTag = processedTag.split(keyword).join('');
+            }
+        }
+        
+        // 返回处理后的tag（已去除所有黑名单关键词）
+        return processedTag.trim();
     }
 
     debugLog(message, ...args) {
@@ -396,6 +430,7 @@ class TagVectorManager {
             return match[1]
                 .split(/[,，、]/)
                 .map(t => t.trim())
+                .map(t => this.applySuperBlacklist(t)) // 🌟 应用超级黑名单
                 .filter(t => this.isValidTag(t));
         } catch (error) {
             return [];
@@ -1667,8 +1702,9 @@ class TagVectorManager {
                         // 计算Hash
                         const hash = crypto.createHash('md5').update(content).digest('hex');
                         
-                        // 提取Tags
+                        // 提取Tags（已应用超级黑名单处理）
                         const rawTags = this.extractTagsFromContent(content);
+                        // 🌟 去重：Set自动处理重复的tag（比如"的故事"和"厨房"可能在多个地方出现）
                         const tags = new Set(rawTags);
                         
                         // 只记录有Tag的文件
@@ -1855,6 +1891,7 @@ class TagVectorManager {
                             // 新文件或文件内容变化
                             if (!fileRecord || fileRecord.hash !== currentHash) {
                                 const rawTags = this.extractTagsFromContent(content);
+                                // 🌟 去重：Set自动处理超级黑名单处理后可能产生的重复tag
                                 const currentTags = new Set(rawTags);
                                 const oldTags = fileRecord ? fileRecord.tags : new Set();
                                 
@@ -2090,6 +2127,7 @@ class TagVectorManager {
             vectorizedTags: Array.from(this.globalTags.values()).filter(d => d.vector !== null).length,
             initialized: this.initialized,
             blacklistedTags: this.config.tagBlacklist.length,
+            superBlacklistedKeywords: this.config.tagBlacklistSuper.length, // 🌟 超级黑名单关键词数量
             dataVersion: this.config.dataVersion,
             workerEnabled: !!this.indexWorker
         };
