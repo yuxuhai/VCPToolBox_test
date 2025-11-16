@@ -1583,7 +1583,13 @@ class VectorDBManager {
 
         try {
             // Step 1: Tag层 - 获取语义相关的tags及其向量
-            const topTagCount = Math.max(10, k * 2);
+            // ✅ 优化：增加Tag召回数量，形成更密集的知识网络
+            // 测试范围：50-100个Tag（从原来的10-20个提升）
+            const baseTagCount = 50;  // 基础召回数量
+            const scaledTagCount = k * 10;  // 根据k值动态缩放
+            const topTagCount = Math.min(Math.max(baseTagCount, scaledTagCount), 100);  // 上限100
+            
+            console.log(`[VectorDB][TagSearch] Recalling ${topTagCount} tags for network search (k=${k})`);
             const matchedTags = await this.tagVectorManager.searchSimilarTags(queryVector, topTagCount);
             
             if (matchedTags.length === 0) {
@@ -1927,13 +1933,16 @@ class VectorDBManager {
         // ✅ 修复：只探测一次dimensions，避免重复向量化
         let sharedDimensions = null;
         try {
+            console.log(`[VectorDB] Probing embedding dimensions...`);
             const dummyEmbeddings = await this.getEmbeddingsWithRetry(["."]);
             if (dummyEmbeddings && dummyEmbeddings.length > 0) {
                 sharedDimensions = dummyEmbeddings[0].length;
-                console.log(`[VectorDB] Detected embedding dimensions: ${sharedDimensions} (single probe for all indices)`);
+                console.log(`[VectorDB] ✅ Detected embedding dimensions: ${sharedDimensions} (single probe for all indices)`);
             }
         } catch (error) {
-            console.warn(`[VectorDB] Failed to detect dimensions:`, error.message);
+            console.warn(`[VectorDB] ⚠️ Failed to detect dimensions:`, error.message);
+            console.warn(`[VectorDB] Will skip pre-warming and continue startup`);
+            return; // ✅ 失败时直接返回，不阻塞启动
         }
         
         const preLoadPromises = sortedDiaries

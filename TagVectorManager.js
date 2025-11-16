@@ -321,14 +321,20 @@ class TagVectorManager {
                             console.log('[TagVectorManager] [Background] No changes detected');
                         }
                     }
+                } catch (innerError) {
+                    console.error('[TagVectorManager] ❌ [Background] Task execution failed:', innerError.message);
+                    console.error('[TagVectorManager] Error stack:', innerError.stack);
                 } finally {
+                    // ✅ 关键修复：确保updateLock一定被释放
                     this.updateLock = false;
+                    console.log('[TagVectorManager] [Background] UpdateLock released');
                 }
             } catch (error) {
                 console.error('[TagVectorManager] ❌ [Background] Initialization failed:', error.message);
                 console.error('[TagVectorManager] System will continue with limited functionality');
             } finally {
                 this.isBackgroundTaskRunning = false;
+                console.log('[TagVectorManager] [Background] Background task completed');
             }
         });
     }
