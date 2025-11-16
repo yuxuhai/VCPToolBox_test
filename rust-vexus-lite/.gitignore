@@ -11,7 +11,7 @@ node_modules/
 package-lock.json
 
 # 编译生成的.node文件（可选，根据需求决定是否提交）
-*.node
+# *.node  # 已注释，允许提交预编译的.node文件用于PR
 
 # IDE相关
 .vscode/
