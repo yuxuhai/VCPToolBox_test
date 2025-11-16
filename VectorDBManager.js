@@ -9,6 +9,7 @@ const { chunkText } = require('./TextChunker.js');
 const WorkerPool = require('./WorkerPool.js');
 const VectorDBStorage = require('./VectorDBStorage.js');
 const TagVectorManager = require('./TagVectorManager.js');
+const TagExpander = require('./TagExpander.js');
 
 // --- Constants ---
 const DIARY_ROOT_PATH = path.join(__dirname, 'dailynote'); // Your diary root directory
@@ -110,6 +111,10 @@ class VectorDBManager {
         // ✅ Tag向量管理器
         this.tagVectorManager = null;
         this.tagVectorEnabled = false;
+        
+        // 🌟 Tag扩展器（毛边网络）
+        this.tagExpander = null;
+        this.tagExpanderEnabled = false;
         
         // ✅ 批量写入优化
         this.usageStatsBuffer = new Map();
@@ -221,6 +226,11 @@ class VectorDBManager {
             healthStatus.tagStats = this.tagVectorManager.getStats();
         }
         
+        // 🌟 添加Tag扩展器统计
+        if (this.tagExpanderEnabled && this.tagExpander) {
+            healthStatus.tagExpanderStats = this.tagExpander.getStats();
+        }
+        
         return healthStatus;
     }
 
@@ -267,6 +277,9 @@ class VectorDBManager {
                     blacklistedTags: stats.blacklistedTags
                 });
                 console.log('[VectorDB] 🎉 Tag-based search is now available!');
+                
+                // 🌟 初始化Tag扩展器（在Tag向量管理器就绪后）
+                this.initializeTagExpander();
             }).catch(error => {
                 console.error('[VectorDB] Tag Vector Manager build failed:', error);
                 this.tagVectorEnabled = false;
@@ -282,6 +295,40 @@ class VectorDBManager {
         }
     }
 
+    /**
+     * 🌟 初始化Tag扩展器（异步后台）
+     */
+    async initializeTagExpander() {
+        try {
+            console.log('[VectorDB] Initializing Tag Expander...');
+            
+            this.tagExpander = new TagExpander({
+                debug: this.config.debug
+            });
+            
+            // 🌟 从共现数据库导出权重矩阵并加载到内存
+            if (this.tagVectorManager?.cooccurrenceDB) {
+                const weightMatrix = this.tagVectorManager.cooccurrenceDB.exportWeightMatrix();
+                await this.tagExpander.loadWeightMatrix(weightMatrix);
+                this.tagExpanderEnabled = true;
+                
+                const expanderStats = this.tagExpander.getStats();
+                console.log('[VectorDB] ✅ Tag Expander ready:', {
+                    totalTags: expanderStats.totalTags,
+                    totalEdges: expanderStats.totalEdges,
+                    avgDegree: expanderStats.avgDegree
+                });
+                console.log('[VectorDB] 🎉 Tag graph expansion is now available!');
+            } else {
+                console.warn('[VectorDB] Cooccurrence DB not available, Tag Expander disabled');
+                this.tagExpanderEnabled = false;
+            }
+            
+        } catch (error) {
+            console.error('[VectorDB] Failed to initialize Tag Expander:', error);
+            this.tagExpanderEnabled = false;
+        }
+    }
 
     async scanAndSyncAll() {
         console.log('[VectorDB] Scanning all diary books for updates...');
@@ -1600,12 +1647,72 @@ class VectorDBManager {
             console.log(`[VectorDB][TagSearch] Matched ${matchedTags.length} tags:`,
                 matchedTags.slice(0, 5).map(t => `${t.tag}(${t.score.toFixed(3)})`).join(', '));
 
-            // Step 2: 向量融合 - 构建Tag增强的查询向量
+            // 🌟 Step 1.5: Tag图扩展 - 使用共现网络扩展相关tags
+            let expandedTags = matchedTags;
+            if (this.tagExpanderEnabled && this.tagExpander) {
+                try {
+                    const seedTags = matchedTags.slice(0, 20).map(t => t.tag); // 取前20个作为种子
+                    const maxExpansion = parseInt(process.env.TAG_EXPAND_MAX_COUNT) || 30;
+                    const minWeight = parseInt(process.env.TAG_EXPAND_MIN_WEIGHT) || 2;
+                    
+                    console.log(`[VectorDB][TagSearch] Expanding ${seedTags.length} seed tags via co-occurrence graph (max: ${maxExpansion})...`);
+                    const graphExpanded = await this.tagExpander.expandTags(seedTags, maxExpansion);
+                    
+                    if (graphExpanded.length > 0) {
+                        console.log(`[VectorDB][TagSearch] Graph expansion found ${graphExpanded.length} related tags:`,
+                            graphExpanded.slice(0, 5).map(t => `${t.tag}(w:${t.weight})`).join(', '));
+                        
+                        // 🌟 合并向量匹配的tags和图扩展的tags
+                        // 过滤掉权重过低的扩展tags
+                        const validExpanded = graphExpanded.filter(t => t.weight >= minWeight);
+                        
+                        // 为图扩展的tags获取向量（如果存在）
+                        const expandedWithVectors = [];
+                        for (const expTag of validExpanded) {
+                            const tagData = this.tagVectorManager.globalTags.get(expTag.tag);
+                            if (tagData && tagData.vector) {
+                                // 归一化权重到0-1范围（假设权重范围是2-50）
+                                const normalizedScore = Math.min(expTag.weight / 50, 1.0);
+                                expandedWithVectors.push({
+                                    tag: expTag.tag,
+                                    score: normalizedScore * 0.8, // 降低扩展tags的权重（相比向量匹配）
+                                    frequency: tagData.frequency,
+                                    diaryCount: tagData.diaries.size,
+                                    diaries: Array.from(tagData.diaries),
+                                    isExpanded: true, // 标记为扩展tag
+                                    cooccurrenceWeight: expTag.weight
+                                });
+                            }
+                        }
+                        
+                        console.log(`[VectorDB][TagSearch] Added ${expandedWithVectors.length} graph-expanded tags with vectors`);
+                        
+                        // 合并原始匹配tags和扩展tags（去重）
+                        const allTagsMap = new Map();
+                        matchedTags.forEach(t => allTagsMap.set(t.tag, t));
+                        expandedWithVectors.forEach(t => {
+                            if (!allTagsMap.has(t.tag)) {
+                                allTagsMap.set(t.tag, t);
+                            }
+                        });
+                        
+                        expandedTags = Array.from(allTagsMap.values());
+                        console.log(`[VectorDB][TagSearch] Total tags after expansion: ${expandedTags.length} (${matchedTags.length} vector + ${expandedWithVectors.length} graph)`);
+                    } else {
+                        console.log(`[VectorDB][TagSearch] No additional tags from graph expansion`);
+                    }
+                } catch (expandError) {
+                    console.error(`[VectorDB][TagSearch] Graph expansion failed:`, expandError.message);
+                    // 继续使用原始matchedTags
+                }
+            }
+
+            // Step 2: 向量融合 - 构建Tag增强的查询向量（使用扩展后的tags）
             // 收集匹配tags的向量（加权平均）
             const tagVectors = [];
             const tagWeights = [];
             
-            for (const tagInfo of matchedTags) {
+            for (const tagInfo of expandedTags) {
                 const tagData = this.tagVectorManager.globalTags.get(tagInfo.tag);
                 if (tagData && tagData.vector) {
                     tagVectors.push(tagData.vector);
@@ -1614,9 +1721,11 @@ class VectorDBManager {
             }
 
             if (tagVectors.length === 0) {
-                console.warn(`[VectorDB][TagSearch] No tag vectors available, fallback`);
+                console.warn(`[VectorDB][TagSearch] No tag vectors available after expansion, fallback`);
                 return await this.search(diaryName, queryVector, k);
             }
+
+            console.log(`[VectorDB][TagSearch] Using ${tagVectors.length} tag vectors for fusion (${expandedTags.length} total tags)`);
 
             // 计算tag向量的加权平均
             const dimensions = queryVector.length;
@@ -1652,15 +1761,19 @@ class VectorDBManager {
             console.log(`[VectorDB][TagSearch] Tag-enhanced search completed in ${(performance.now() - startTime).toFixed(2)}ms`);
             console.log(`[VectorDB][TagSearch] Found ${searchResults.length} results with tag semantic boost`);
 
-            // ✅ 在结果中附加tag信息（用于VCP Info广播）
+            // ✅ 在结果中附加tag信息（包含图扩展信息）
             const enhancedResults = searchResults.map(result => {
                 // 计算Tag匹配分数（归一化的平均相似度）
-                const avgTagScore = matchedTags.length > 0
-                    ? matchedTags.reduce((sum, t) => sum + t.score, 0) / matchedTags.length
+                const avgTagScore = expandedTags.length > 0
+                    ? expandedTags.reduce((sum, t) => sum + t.score, 0) / expandedTags.length
                     : 0;
                 
                 // 计算提权倍数：基于Tag权重和匹配数量
-                const boostFactor = 1 + (tagWeight * avgTagScore * Math.min(matchedTags.length, 5) / 5);
+                const boostFactor = 1 + (tagWeight * avgTagScore * Math.min(expandedTags.length, 10) / 10);
+                
+                // 分离向量匹配的tags和图扩展的tags
+                const vectorMatchedTags = expandedTags.filter(t => !t.isExpanded);
+                const graphExpandedTags = expandedTags.filter(t => t.isExpanded);
                 
                 return {
                     ...result,
@@ -1670,8 +1783,14 @@ class VectorDBManager {
                     score: result.score * boostFactor,
                     // ✅ Tag匹配信息
                     tagMatchScore: avgTagScore,
-                    matchedTags: matchedTags.slice(0, 10).map(t => t.tag), // 取前10个最相关的tag
-                    tagMatchCount: matchedTags.length,
+                    matchedTags: vectorMatchedTags.slice(0, 10).map(t => t.tag), // 向量匹配的tags
+                    expandedTags: graphExpandedTags.slice(0, 10).map(t => ({ // 🌟 图扩展的tags
+                        tag: t.tag,
+                        weight: t.cooccurrenceWeight
+                    })),
+                    tagMatchCount: vectorMatchedTags.length,
+                    expandedTagCount: graphExpandedTags.length, // 🌟 扩展tag数量
+                    totalTagCount: expandedTags.length,
                     boostFactor: boostFactor
                 };
             });

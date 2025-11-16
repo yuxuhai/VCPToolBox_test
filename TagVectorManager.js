@@ -10,6 +10,7 @@ const chokidar = require('chokidar');
 const crypto = require('crypto');
 const TagIndexWorker = require('./TagIndexWorker');
 const TagVectorizeWorker = require('./TagVectorizeWorker');
+const TagCooccurrenceDB = require('./TagCooccurrenceDB');
 
 /**
  * 全局Tag向量管理器
@@ -97,6 +98,14 @@ class TagVectorManager {
         // 状态
         this.initialized = false;
         this.isBuilding = false;
+        
+        // 🌟 Tag共现图谱数据库
+        this.cooccurrenceDB = null;
+        this.cooccurrenceEnabled = false;
+        
+        // 🌟 权重矩阵导出防抖
+        this.matrixExportTimer = null;
+        this.matrixExportDelay = parseInt(process.env.TAG_MATRIX_EXPORT_DELAY) || 30000; // 默认30秒
         
         // 🌟 Worker Threads 支持
         this.indexWorker = null;
@@ -267,6 +276,36 @@ class TagVectorManager {
 
         // ✅ 竞态修复：在启动文件监控前标记已初始化，避免监控事件在后台任务期间丢失
         this.initialized = true;
+        
+        // ====== 🌟 新增步骤: 初始化Tag共现数据库 ======
+        try {
+            this.cooccurrenceDB = new TagCooccurrenceDB(
+                path.join(this.config.vectorStorePath, 'TagCooccurrence.db')
+            );
+            await this.cooccurrenceDB.initialize();
+            this.cooccurrenceEnabled = true;
+            console.log('[TagVectorManager] ✅ Tag cooccurrence database initialized');
+            
+            // 🔧 鲁棒性改进：检查数据一致性，需要时触发同步
+            const dbStats = this.cooccurrenceDB.getStats();
+            const needsSync = await this.checkCooccurrenceConsistency(dbStats);
+            
+            if (needsSync) {
+                console.log('[TagVectorManager] 🔄 Will sync cooccurrence database in background...');
+                // 异步后台同步（不阻塞启动）
+                setImmediate(() => {
+                    this.syncCooccurrenceDatabase().catch(error => {
+                        console.error('[TagVectorManager] Failed to sync cooccurrence DB:', error);
+                    });
+                });
+            } else {
+                console.log('[TagVectorManager] ✅ Cooccurrence database is consistent');
+            }
+        } catch (error) {
+            console.error('[TagVectorManager] Failed to initialize cooccurrence DB:', error);
+            console.warn('[TagVectorManager] Tag graph expansion will be disabled');
+            this.cooccurrenceEnabled = false;
+        }
         
         // ====== 步骤3: 启动文件监控======
         this.startFileWatcher();
@@ -1436,6 +1475,18 @@ class TagVectorManager {
         // 6. 更新注册表
         this.fileRegistry.set(filePath, { hash: currentHash, tags: currentTags });
 
+        // 🌟 新增：更新Tag共现关系数据库
+        if (this.cooccurrenceEnabled && currentTags.size >= 2) {
+            try {
+                this.cooccurrenceDB.recordTagGroup(filePath, Array.from(currentTags), diaryName);
+                
+                // 🌟 触发防抖导出（避免频繁写入JSON文件）
+                this.scheduleMatrixExport();
+            } catch (error) {
+                console.error('[TagVectorManager] Failed to record tag group:', error.message);
+            }
+        }
+
         // 7. 触发异步处理 (向量化 + 索引 + 保存)
         this.triggerPostUpdateProcessing(addedTags);
     }
@@ -1454,6 +1505,18 @@ class TagVectorManager {
         
         this.applyDiff(diaryName, [], removedTags);
         this.fileRegistry.delete(filePath);
+        
+        // 🌟 新增：从共现数据库移除tag组
+        if (this.cooccurrenceEnabled) {
+            try {
+                this.cooccurrenceDB.removeTagGroup(filePath);
+                
+                // 🌟 触发防抖导出
+                this.scheduleMatrixExport();
+            } catch (error) {
+                console.error('[TagVectorManager] Failed to remove tag group:', error.message);
+            }
+        }
         
         this.triggerPostUpdateProcessing([]);
     }
@@ -2125,6 +2188,151 @@ class TagVectorManager {
     }
 
     /**
+     * 🔧 检查Tag共现数据库的一致性
+     * @param {Object} dbStats - 数据库统计信息
+     * @returns {boolean} - 是否需要同步
+     */
+    async checkCooccurrenceConsistency(dbStats) {
+        if (!dbStats || !this.cooccurrenceEnabled) return false;
+        
+        const { total_groups } = dbStats;
+        
+        // 情况1：数据库为空 → 需要首次构建
+        if (total_groups === 0) {
+            console.log('[TagVectorManager] Cooccurrence DB is empty, needs initial build');
+            return true;
+        }
+        
+        // 情况2：检查FileRegistry是否与DB同步
+        if (this.fileRegistry.size === 0) {
+            console.log('[TagVectorManager] FileRegistry empty but DB has data, needs sync');
+            return true;
+        }
+        
+        // 情况3：检查记录数量是否合理（DB组数应该接近FileRegistry文件数）
+        const expectedGroups = this.fileRegistry.size;
+        const groupDiff = Math.abs(total_groups - expectedGroups);
+        const diffRatio = expectedGroups > 0 ? groupDiff / expectedGroups : 1.0;
+        
+        if (diffRatio > 0.1) {
+            console.log(`[TagVectorManager] Cooccurrence DB inconsistent: DB=${total_groups}, Expected≈${expectedGroups} (${(diffRatio*100).toFixed(1)}% diff)`);
+            return true;
+        }
+        
+        console.log(`[TagVectorManager] Cooccurrence DB consistency check passed: ${total_groups} groups`);
+        return false;
+    }
+
+    /**
+     * 🔧 同步Tag共现数据库（从FileRegistry重建）
+     * 只处理变化的文件，实现真正的diff同步
+     */
+    async syncCooccurrenceDatabase() {
+        if (!this.cooccurrenceEnabled) return;
+        
+        console.log('[TagVectorManager] 🔄 Syncing cooccurrence database...');
+        const startTime = Date.now();
+        
+        try {
+            // 步骤1：收集当前文件系统中所有有tag的文件
+            const currentFiles = new Set();
+            const diaryBooks = await fs.readdir(this.config.diaryRootPath, { withFileTypes: true });
+            
+            for (const dirent of diaryBooks) {
+                if (!dirent.isDirectory()) continue;
+                
+                const diaryName = dirent.name;
+                if (this.shouldIgnoreFolder(diaryName)) continue;
+                
+                const diaryPath = path.join(this.config.diaryRootPath, diaryName);
+                
+                try {
+                    const files = await fs.readdir(diaryPath);
+                    const diaryFiles = files.filter(f =>
+                        f.toLowerCase().endsWith('.txt') || f.toLowerCase().endsWith('.md')
+                    );
+                    
+                    for (const file of diaryFiles) {
+                        const filePath = path.join(diaryPath, file);
+                        currentFiles.add(filePath);
+                    }
+                } catch (error) {
+                    console.error(`[TagVectorManager] Error listing folder "${diaryName}":`, error.message);
+                }
+            }
+            
+            // 步骤2：从FileRegistry同步到CooccurrenceDB
+            let syncCount = 0;
+            
+            for (const [filePath, fileRecord] of this.fileRegistry.entries()) {
+                if (!currentFiles.has(filePath)) {
+                    // 文件已删除但FileRegistry中仍存在，从DB移除
+                    this.cooccurrenceDB.removeTagGroup(filePath);
+                    syncCount++;
+                } else if (fileRecord.tags.size >= 2) {
+                    // 文件存在且有足够tag，记录到DB
+                    const diaryName = path.basename(path.dirname(filePath));
+                    this.cooccurrenceDB.recordTagGroup(filePath, Array.from(fileRecord.tags), diaryName);
+                    syncCount++;
+                }
+                
+                // 每100个文件让出一次控制权
+                if (syncCount % 100 === 0) {
+                    await new Promise(resolve => setImmediate(resolve));
+                }
+            }
+            
+            const syncTime = ((Date.now() - startTime) / 1000).toFixed(1);
+            const finalStats = this.cooccurrenceDB.getStats();
+            
+            console.log(`[TagVectorManager] ✅ Cooccurrence DB synced in ${syncTime}s:`, {
+                processedFiles: syncCount,
+                totalGroups: finalStats.total_groups,
+                totalPairs: finalStats.total_pairs,
+                uniqueTags: finalStats.unique_tags
+            });
+            
+            // 🌟 同步完成后导出JSON文件（方便调试和快速加载）
+            if (finalStats.total_pairs > 0) {
+                try {
+                    const exportPath = await this.cooccurrenceDB.exportToFile();
+                    console.log(`[TagVectorManager] 💾 Weight matrix exported to: ${path.basename(exportPath)}`);
+                } catch (exportError) {
+                    console.warn('[TagVectorManager] Failed to export matrix file:', exportError.message);
+                }
+            }
+            
+        } catch (error) {
+            console.error('[TagVectorManager] Cooccurrence DB sync failed:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * 🌟 调度权重矩阵导出（防抖机制）
+     */
+    scheduleMatrixExport() {
+        if (!this.cooccurrenceEnabled) return;
+        
+        // 清除旧定时器
+        if (this.matrixExportTimer) {
+            clearTimeout(this.matrixExportTimer);
+        }
+        
+        // 设置新的防抖定时器
+        this.matrixExportTimer = setTimeout(async () => {
+            try {
+                const exportPath = await this.cooccurrenceDB.exportToFile();
+                console.log(`[TagVectorManager] 💾 Matrix auto-exported to: ${path.basename(exportPath)}`);
+            } catch (error) {
+                console.error('[TagVectorManager] Matrix export failed:', error.message);
+            }
+        }, this.matrixExportDelay);
+        
+        this.debugLog(`Matrix export scheduled (delay: ${this.matrixExportDelay}ms)`);
+    }
+
+    /**
      * 获取统计
      */
     getStats() {
@@ -2141,6 +2349,11 @@ class TagVectorManager {
         // 🌟 添加 Worker 统计
         if (this.indexWorker) {
             baseStats.worker = this.indexWorker.getStats();
+        }
+        
+        // 🌟 添加Tag共现图谱统计
+        if (this.cooccurrenceEnabled && this.cooccurrenceDB) {
+            baseStats.cooccurrenceStats = this.cooccurrenceDB.getStats();
         }
         
         return baseStats;
@@ -2204,6 +2417,16 @@ class TagVectorManager {
             clearTimeout(timeoutId);
         }
         this.pendingUpdates.clear();
+        
+        // 🌟 关闭Tag共现数据库
+        if (this.cooccurrenceDB) {
+            try {
+                this.cooccurrenceDB.close();
+                console.log('[TagVectorManager] Tag cooccurrence database closed');
+            } catch (error) {
+                console.error('[TagVectorManager] Error closing cooccurrence DB:', error);
+            }
+        }
         
         console.log('[TagVectorManager] ✅ Shutdown complete');
     }
