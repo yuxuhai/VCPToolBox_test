@@ -262,16 +262,17 @@ class TagVectorManager {
         if (VexusIndex) {
             try {
                 const dimensions = parseInt(process.env.VECTORDB_DIMENSION) || 3072;
-                this.vexus = VexusIndex.load(vexusIndexPath, vexusMapPath);
+                // ✅ 修复：传递维度参数给load方法
+                this.vexus = VexusIndex.load(vexusIndexPath, vexusMapPath, dimensions);
                 this.usingVexus = true;
-                console.log('[TagVectorManager] 🦀 ✅ Loaded Vexus-Lite index');
+                console.log(`[TagVectorManager] 🦀 ✅ Loaded Vexus-Lite index (${dimensions}D)`);
             } catch (e) {
                 // Vexus索引不存在，创建新的
                 try {
                     const dimensions = parseInt(process.env.VECTORDB_DIMENSION) || 3072;
                     this.vexus = new VexusIndex(dimensions, 100000);
                     this.usingVexus = true;
-                    console.log('[TagVectorManager] 🦀 ✅ Created new Vexus-Lite index');
+                    console.log(`[TagVectorManager] 🦀 ✅ Created new Vexus-Lite index (${dimensions}D, capacity: 100000)`);
                 } catch (createError) {
                     console.warn('[TagVectorManager] Failed to create Vexus index:', createError.message);
                     this.usingVexus = false;
