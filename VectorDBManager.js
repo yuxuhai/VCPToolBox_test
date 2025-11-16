@@ -111,6 +111,7 @@ class VectorDBManager {
         // ✅ Tag向量管理器
         this.tagVectorManager = null;
         this.tagVectorEnabled = false;
+        this.tagRAGSystemEnabled = process.env.tagRAGSystem === 'true'; // 🌟 Tag RAG系统总开关
         
         // 🌟 Tag扩展器（毛边网络）
         this.tagExpander = null;
@@ -240,7 +241,12 @@ class VectorDBManager {
         await this.storage.initialize();
         
         // ✅ 初始化Tag向量管理器（异步后台，不阻塞启动）
-        this.initializeTagVectorManager(); // ⚠️ 不使用 await，让它在后台运行
+        if (this.tagRAGSystemEnabled) {
+            console.log('[VectorDB] Tag RAG System is ENABLED');
+            this.initializeTagVectorManager(); // ⚠️ 不使用 await，让它在后台运行
+        } else {
+            console.log('[VectorDB] Tag RAG System is DISABLED (tagRAGSystem=false)');
+        }
         
         await this.scanAndSyncAll();
         await this.cacheDiaryNameVectors();
@@ -253,6 +259,12 @@ class VectorDBManager {
      * ✅ 初始化Tag向量管理器（异步后台构建）
      */
     async initializeTagVectorManager() {
+        // 🌟 双重检查：即使被调用，也要检查开关状态
+        if (!this.tagRAGSystemEnabled) {
+            console.log('[VectorDB] Tag Vector Manager initialization skipped (system disabled)');
+            return;
+        }
+        
         try {
             console.log('[VectorDB] Initializing Tag Vector Manager...');
             
@@ -1619,6 +1631,12 @@ class VectorDBManager {
      */
     async searchWithTagBoost(diaryName, queryVector, k = 3, tagWeight = 0.65) {
         const startTime = performance.now();
+        
+        // 🌟 检查Tag RAG系统开关
+        if (!this.tagRAGSystemEnabled) {
+            console.log(`[VectorDB][TagSearch] Tag RAG System disabled, fallback to normal search`);
+            return await this.search(diaryName, queryVector, k);
+        }
         
         // 如果Tag功能未启用，回退到普通搜索
         if (!this.tagVectorEnabled || !this.tagVectorManager) {
