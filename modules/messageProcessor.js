@@ -250,40 +250,8 @@ async function replacePriorityVariables(text, context, role) {
         processedText = processedText.replaceAll(placeholder, emojiList || `[${emojiName}列表不可用]`);
     }
 
-    // --- 日记本处理 (已修复循环风险) ---
-    const diaryPlaceholderRegex = /\{\{(.+?)日记本\}\}/g;
-    let allDiariesData = {};
-    const allDiariesDataString = pluginManager.getPlaceholderValue("{{AllCharacterDiariesData}}");
-
-    if (allDiariesDataString && !allDiariesDataString.startsWith("[Placeholder")) {
-        try {
-            allDiariesData = JSON.parse(allDiariesDataString);
-        } catch (e) {
-            console.error(`[replacePriorityVariables] Failed to parse AllCharacterDiariesData JSON: ${e.message}. Data: ${allDiariesDataString.substring(0, 100)}...`);
-        }
-    } else if (allDiariesDataString && allDiariesDataString.startsWith("[Placeholder")) {
-        if (DEBUG_MODE) console.warn(`[replacePriorityVariables] Placeholder {{AllCharacterDiariesData}} not found or not yet populated. Value: ${allDiariesDataString}`);
-    }
-
-    // Step 1: Find all unique diary placeholders in the original text to avoid loops.
-    const matches = [...processedText.matchAll(diaryPlaceholderRegex)];
-    const uniquePlaceholders = [...new Set(matches.map(match => match[0]))];
-
-    // Step 2: Iterate through the unique placeholders and replace them.
-    for (const placeholder of uniquePlaceholders) {
-        // Extract character name from placeholder like "{{小雨日记本}}" -> "小雨"
-        const characterNameMatch = placeholder.match(/\{\{(.+?)日记本\}\}/);
-        if (characterNameMatch && characterNameMatch[1]) {
-            const characterName = characterNameMatch[1];
-            let diaryContent = `[${characterName}日记本内容为空或未从插件获取]`;
-            if (allDiariesData.hasOwnProperty(characterName)) {
-                diaryContent = allDiariesData[characterName];
-            }
-            // Replace all instances of this specific placeholder.
-            // This is safe because we are iterating over a pre-determined list, not re-scanning the string.
-            processedText = processedText.replaceAll(placeholder, diaryContent);
-        }
-    }
+    // --- 日记本处理 ---
+    // 单个日记本占位符由插件直接提供，这里不再需要聚合处理
 
     return processedText;
 }
