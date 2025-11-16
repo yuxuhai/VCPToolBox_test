@@ -2,6 +2,7 @@
 // 🌟 全局Tag向量管理器 - 独立模块，零侵入性设计
 // ✅ 已修复所有致命bug和隐患
 // 🚀 集成 Worker Threads 支持
+// 🦀 集成 Vexus-Lite Rust引擎
 
 const fs = require('fs').promises;
 const path = require('path');
@@ -11,6 +12,17 @@ const crypto = require('crypto');
 const TagIndexWorker = require('./TagIndexWorker');
 const TagVectorizeWorker = require('./TagVectorizeWorker');
 const TagCooccurrenceDB = require('./TagCooccurrenceDB');
+
+// 🦀 尝试加载Vexus-Lite Rust引擎
+let VexusIndex = null;
+try {
+    const vexusModule = require('./rust-vexus-lite');
+    VexusIndex = vexusModule.VexusIndex;
+    console.log('[TagVectorManager] 🦀 Vexus-Lite Rust engine loaded successfully');
+} catch (e) {
+    console.log('[TagVectorManager] Vexus-Lite not available, using JS implementation only');
+    console.log('[TagVectorManager] Error:', e.message);
+}
 
 /**
  * 全局Tag向量管理器
@@ -59,7 +71,9 @@ class TagVectorManager {
 
         // Tag数据结构
         this.globalTags = new Map(); // tag_text → { vector, frequency, diaries: Set }
-        this.tagIndex = null; // HNSW索引
+        this.tagIndex = null; // HNSW索引 (hnswlib-node)
+        this.vexus = null; // 🦀 Vexus-Lite索引 (Rust)
+        this.usingVexus = false; // 🦀 是否使用Vexus引擎
         this.tagToLabel = new Map(); // tag_text → label
         this.labelToTag = new Map(); // label → tag_text
         
@@ -236,9 +250,34 @@ class TagVectorManager {
 
         const tagIndexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
         const tagDataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
+        
+        // 🦀 Vexus-Lite文件路径
+        const vexusIndexPath = path.join(this.config.vectorStorePath, 'GlobalTags_vexus.usearch');
+        const vexusMapPath = path.join(this.config.vectorStorePath, 'GlobalTags_vexus.map');
 
         let libraryExists = false;
         let needsBuildRegistry = false;
+        
+        // 🦀 步骤0: 尝试加载Vexus-Lite索引
+        if (VexusIndex) {
+            try {
+                const dimensions = parseInt(process.env.VECTORDB_DIMENSION) || 3072;
+                this.vexus = VexusIndex.load(vexusIndexPath, vexusMapPath);
+                this.usingVexus = true;
+                console.log('[TagVectorManager] 🦀 ✅ Loaded Vexus-Lite index');
+            } catch (e) {
+                // Vexus索引不存在，创建新的
+                try {
+                    const dimensions = parseInt(process.env.VECTORDB_DIMENSION) || 3072;
+                    this.vexus = new VexusIndex(dimensions, 100000);
+                    this.usingVexus = true;
+                    console.log('[TagVectorManager] 🦀 ✅ Created new Vexus-Lite index');
+                } catch (createError) {
+                    console.warn('[TagVectorManager] Failed to create Vexus index:', createError.message);
+                    this.usingVexus = false;
+                }
+            }
+        }
         
         // ====== 步骤1: 加载Tag库 ======
         let needsIncrementalVectorize = false;
@@ -749,6 +788,47 @@ class TagVectorManager {
      * @returns {Array} - 匹配的tags及其得分
      */
     async searchSimilarTags(input, k = 10) {
+        // 🦀 优先使用Vexus-Lite搜索
+        if (this.usingVexus && this.vexus) {
+            try {
+                let queryVector;
+                
+                // ✅ 支持直接传入向量或文本
+                if (Array.isArray(input)) {
+                    queryVector = input;
+                } else if (typeof input === 'string') {
+                    // 如果传入文本，先向量化
+                    const vectors = await this.embeddingFunction([input]);
+                    queryVector = vectors[0];
+                } else {
+                    throw new Error('Input must be a vector array or string');
+                }
+
+                // 🦀 转换为Buffer传递给Rust
+                const queryBuffer = Buffer.from(new Float32Array(queryVector).buffer);
+                const results = this.vexus.search(queryBuffer, k);
+                
+                // 添加额外的元数据
+                const enrichedResults = results.map(result => {
+                    const tagData = this.globalTags.get(result.tag);
+                    return {
+                        tag: result.tag,
+                        score: result.score,
+                        frequency: tagData?.frequency || 0,
+                        diaryCount: tagData?.diaries.size || 0,
+                        diaries: Array.from(tagData?.diaries || [])
+                    };
+                });
+                
+                this.debugLog(`🦀 Found ${enrichedResults.length} similar tags using Vexus`);
+                return enrichedResults;
+            } catch (error) {
+                console.error('[TagVectorManager] Vexus search failed, falling back to hnswlib:', error.message);
+                // Fall through to hnswlib backup
+            }
+        }
+        
+        // Fallback: 使用hnswlib-node
         if (!this.tagIndex) {
             console.warn('[TagVectorManager] Tag index not initialized');
             return [];
@@ -853,6 +933,19 @@ class TagVectorManager {
     async _saveGlobalTagLibraryImpl(indexPath, dataPath, incrementalMode = false) {
         console.log('[TagVectorManager] 💾 Starting save operation (non-blocking mode)...');
         const startTime = Date.now();
+        
+        // 🦀 如果使用Vexus，保存Rust索引
+        if (this.usingVexus && this.vexus) {
+            try {
+                const vexusIndexPath = indexPath.replace('.bin', '_vexus.usearch');
+                const vexusMapPath = dataPath.replace('.json', '_vexus.map');
+                
+                this.vexus.save(vexusIndexPath, vexusMapPath);
+                console.log('[TagVectorManager] 🦀 ✅ Saved Vexus-Lite index');
+            } catch (vexusError) {
+                console.error('[TagVectorManager] Failed to save Vexus index:', vexusError.message);
+            }
+        }
         
         const metaPath = dataPath.replace('.json', '_meta.json');
         const vectorBasePath = dataPath.replace('.json', '_vectors');
@@ -2063,12 +2156,16 @@ class TagVectorManager {
 
     /**
      * 🚀 完全非阻塞的并发批量向量化（使用专用Worker，NO checkpoint阻塞）
+     * 🦀 已集成Vexus-Lite支持
      */
     async vectorizeTagBatch(tags) {
         const batchSize = this.config.tagBatchSize;
         const concurrency = parseInt(process.env.TAG_VECTORIZE_CONCURRENCY) || 5;
         
         console.log(`[TagVectorManager] 🚀 Starting NON-BLOCKING vectorization: ${tags.length} tags (concurrency: ${concurrency})...`);
+        if (this.usingVexus) {
+            console.log(`[TagVectorManager] 🦀 Using Vexus-Lite engine`);
+        }
         
         // ✅ 竞态修复1：使用原子操作获取shard计算快照，防止计算过程中shardCount变化
         const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
@@ -2088,17 +2185,19 @@ class TagVectorManager {
         
         console.log(`[TagVectorManager] 📸 Vectorization snapshot: ${vectorizationSnapshot.currentVectorizedCount} existing + ${vectorizationSnapshot.tagsToVectorize} new = ${stableShardCount} shards`);
         
-        // ✅ 竞态修复2：预先计算并原子标记所有受影响的shard
-        const affectedShards = new Set();
-        for (const tag of tags) {
-            const shardIndex = this.getShardIndexForTag(tag, stableShardCount);
-            affectedShards.add(shardIndex);
+        // ✅ 竞态修复2：预先计算并原子标记所有受影响的shard（仅JS模式需要）
+        if (!this.usingVexus) {
+            const affectedShards = new Set();
+            for (const tag of tags) {
+                const shardIndex = this.getShardIndexForTag(tag, stableShardCount);
+                affectedShards.add(shardIndex);
+            }
+            
+            // 🔒 原子标记操作：立即标记所有脏shard，防止并发保存操作跳过
+            affectedShards.forEach(idx => this.dirtyShards.add(idx));
+            
+            console.log(`[TagVectorManager] 🎯 Pre-marked ${affectedShards.size} shards as dirty (shardCount: ${stableShardCount})`);
         }
-        
-        // 🔒 原子标记操作：立即标记所有脏shard，防止并发保存操作跳过
-        affectedShards.forEach(idx => this.dirtyShards.add(idx));
-        
-        console.log(`[TagVectorManager] 🎯 Pre-marked ${affectedShards.size} shards as dirty (shardCount: ${stableShardCount})`);
         
         // 🚀 使用向量化Worker（完全非阻塞）
         if (this.vectorizeWorker) {
@@ -2110,7 +2209,27 @@ class TagVectorManager {
                     batchSize
                 );
                 
-                // 写入内存
+                // 🦀 如果使用Vexus，批量添加到索引
+                if (this.usingVexus && vectors.length > 0) {
+                    try {
+                        // 准备Float32Array数据
+                        const dimensions = vectors[0].length;
+                        const flatVectors = new Float32Array(tags.length * dimensions);
+                        for (let i = 0; i < tags.length; i++) {
+                            flatVectors.set(vectors[i], i * dimensions);
+                        }
+                        
+                        // 批量添加到Vexus索引
+                        const vectorBuffer = Buffer.from(flatVectors.buffer);
+                        this.vexus.upsert(tags, vectorBuffer);
+                        
+                        console.log(`[TagVectorManager] 🦀 Added ${tags.length} vectors to Vexus index`);
+                    } catch (vexusError) {
+                        console.error('[TagVectorManager] Vexus upsert failed:', vexusError.message);
+                    }
+                }
+                
+                // 写入内存（无论是否使用Vexus都需要）
                 for (let i = 0; i < tags.length; i++) {
                     const tag = tags[i];
                     const tagData = this.globalTags.get(tag);
@@ -2120,7 +2239,7 @@ class TagVectorManager {
                     }
                 }
                 
-                console.log(`[TagVectorManager] ✅ NON-BLOCKING vectorization completed: ${vectors.length} vectors, ${this.dirtyShards.size} dirty shards`);
+                console.log(`[TagVectorManager] ✅ NON-BLOCKING vectorization completed: ${vectors.length} vectors`);
                 
                 return;
             } catch (error) {
@@ -2142,6 +2261,22 @@ class TagVectorManager {
             try {
                 const vectors = await this.embeddingFunction(batch);
                 
+                // 🦀 如果使用Vexus，批量添加到索引
+                if (this.usingVexus && vectors.length > 0) {
+                    try {
+                        const dimensions = vectors[0].length;
+                        const flatVectors = new Float32Array(batch.length * dimensions);
+                        for (let j = 0; j < batch.length; j++) {
+                            flatVectors.set(vectors[j], j * dimensions);
+                        }
+                        
+                        const vectorBuffer = Buffer.from(flatVectors.buffer);
+                        this.vexus.upsert(batch, vectorBuffer);
+                    } catch (vexusError) {
+                        console.error(`[TagVectorManager] Vexus upsert failed for batch ${i}:`, vexusError.message);
+                    }
+                }
+                
                 for (let j = 0; j < batch.length; j++) {
                     const tag = batch[j];
                     const tagData = this.globalTags.get(tag);
@@ -2162,7 +2297,7 @@ class TagVectorManager {
             }
         }
         
-        console.log(`[TagVectorManager] ✅ Sync vectorization completed: ${processedTags} vectors, ${this.dirtyShards.size} dirty shards (pre-marked)`);
+        console.log(`[TagVectorManager] ✅ Sync vectorization completed: ${processedTags} vectors`);
     }
 
     /**
@@ -2343,8 +2478,19 @@ class TagVectorManager {
             blacklistedTags: this.config.tagBlacklist.length,
             superBlacklistedKeywords: this.config.tagBlacklistSuper.length, // 🌟 超级黑名单关键词数量
             dataVersion: this.config.dataVersion,
-            workerEnabled: !!this.indexWorker
+            workerEnabled: !!this.indexWorker,
+            usingVexus: this.usingVexus, // 🦀 是否使用Vexus-Lite引擎
+            engine: this.usingVexus ? 'Vexus-Lite (Rust)' : 'hnswlib-node (JS)' // 🦀 当前引擎
         };
+        
+        // 🦀 添加Vexus统计
+        if (this.usingVexus && this.vexus) {
+            try {
+                baseStats.vexusStats = this.vexus.stats();
+            } catch (e) {
+                baseStats.vexusStats = { error: e.message };
+            }
+        }
         
         // 🌟 添加 Worker 统计
         if (this.indexWorker) {
