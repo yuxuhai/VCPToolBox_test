@@ -198,14 +198,22 @@ class TagVectorManager {
         let needsBuildRegistry = false;
         
         // ====== 步骤1: 加载Tag库 ======
+        let needsIncrementalVectorize = false;
         try {
             await this.loadGlobalTagLibrary(tagIndexPath, tagDataPath);
             console.log('[TagVectorManager] ✅ Loaded existing library');
             libraryExists = true;
         } catch (e) {
-            console.log('[TagVectorManager] No existing library found, will build in background...');
-            libraryExists = false;
-            needsBuildRegistry = true;
+            if (e.message === 'NEED_INCREMENTAL_VECTORIZE') {
+                // ✅ 特殊情况：元数据存在但向量丢失，需要增量向量化
+                console.log('[TagVectorManager] ⚠️ Metadata loaded but vectors missing, will vectorize incrementally in background...');
+                libraryExists = true; // 元数据已加载
+                needsIncrementalVectorize = true;
+            } else {
+                console.log('[TagVectorManager] No existing library found, will build in background...');
+                libraryExists = false;
+                needsBuildRegistry = true;
+            }
         }
 
         // ====== 步骤2: 加载/构建文件注册表======
@@ -240,17 +248,34 @@ class TagVectorManager {
                 this.updateLock = true;
                 
                 try {
-                    if (needsBuildRegistry) {
+                    if (needsBuildRegistry && !needsIncrementalVectorize) {
                         console.log('[TagVectorManager] 🔨 [Background] Building FileRegistry...');
                         await this.buildFileRegistryFromScratch();
                     }
 
                     if (!libraryExists) {
+                        // 完全从零构建
                         console.log('[TagVectorManager] 🚀 [Background] Building library from scratch...');
                         await this.buildGlobalTagLibrary();
                         await this.saveGlobalTagLibrary(tagIndexPath, tagDataPath);
                         console.log('[TagVectorManager] ✅ [Background] Library built successfully');
+                    } else if (needsIncrementalVectorize) {
+                        // ✅ 增量向量化：元数据已有，只缺向量
+                        console.log('[TagVectorManager] 🔧 [Background] Starting incremental vectorization for existing tags...');
+                        const tagsNeedingVectors = Array.from(this.globalTags.entries())
+                            .filter(([_, data]) => data.vector === null)
+                            .map(([tag, _]) => tag);
+                        
+                        console.log(`[TagVectorManager] [Background] Found ${tagsNeedingVectors.length} tags needing vectors`);
+                        
+                        if (tagsNeedingVectors.length > 0) {
+                            await this.vectorizeTagBatch(tagsNeedingVectors);
+                            await this.buildHNSWIndex();
+                            await this.saveGlobalTagLibrary(tagIndexPath, tagDataPath);
+                            console.log('[TagVectorManager] ✅ [Background] Incremental vectorization completed');
+                        }
                     } else if (!needsBuildRegistry) {
+                        // 正常增量更新
                         console.log('[TagVectorManager] 🔍 [Background] Checking for new tags...');
                         const hasChanges = await this.incrementalUpdateOptimized();
                         if (hasChanges) {
@@ -1138,8 +1163,20 @@ class TagVectorManager {
         const tagsWithVectors = Array.from(tempGlobalTags.entries())
             .filter(([_, data]) => data.vector !== null);
 
+        // ✅ 关键修复：即使没有向量，也加载元数据，稍后增量向量化
         if (tagsWithVectors.length === 0) {
-            throw new Error('No vectorized tags found in loaded data');
+            console.warn('[TagVectorManager] ⚠️ No vectors found, loading metadata only (will vectorize incrementally)');
+            
+            // 替换元数据（保留tag信息，向量为null）
+            this.globalTags = tempGlobalTags;
+            this.tagIndex = null; // 索引需要重建
+            this.tagToLabel.clear();
+            this.labelToTag.clear();
+            
+            console.log(`[TagVectorManager] ✅ Loaded ${tempGlobalTags.size} tags (no vectors, incremental build needed)`);
+            
+            // 抛出特殊错误，让initialize()知道需要增量向量化
+            throw new Error('NEED_INCREMENTAL_VECTORIZE');
         }
 
         const dimensions = tagsWithVectors[0][1].vector.length;
@@ -1611,7 +1648,7 @@ class TagVectorManager {
     }
 
     /**
-     * 🌟 执行批量索引重建（信号枪机制）
+     * 🌟 执行批量索引重建（信号枪机制 + 优化保存策略）
      */
     async executeBatchIndexRebuild() {
         this.indexRebuildTimer = null;
@@ -1641,9 +1678,11 @@ class TagVectorManager {
         this.updateLock = true;
         
         try {
-            // 1. 向量化
+            // 1. 向量化（不触发checkpoint）
             console.log(`[TagVectorManager] 🔢 Vectorizing ${tagsToAdd.length} tags...`);
             await this.vectorizeTagBatch(tagsToAdd);
+            
+            console.log(`[TagVectorManager] ✅ Vectorization done, dirty shards: ${this.dirtyShards.size}`);
             
             // 2. 更新索引
             if (!this.tagIndex) {
@@ -1652,11 +1691,16 @@ class TagVectorManager {
                 await this.addTagsToIndex(tagsToAdd);
             }
             
-            // 3. 保存到磁盘
-            const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
-            const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
-            console.log(`[TagVectorManager] 💾 Saving batch changes...`);
-            await this.saveGlobalTagLibrary(indexPath, dataPath, true);
+            // 3. ✅ 关键修复：只在有脏数据时才保存
+            if (this.dirtyShards.size > 0 || this.dirtyTags.size > 0) {
+                const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
+                const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
+                console.log(`[TagVectorManager] 💾 Saving batch changes (${this.dirtyShards.size} dirty shards)...`);
+                await this.saveGlobalTagLibrary(indexPath, dataPath, true);
+                console.log(`[TagVectorManager] ✅ Batch changes saved`);
+            } else {
+                console.log(`[TagVectorManager] ⏭️ No dirty data, skipping save`);
+            }
             
             console.log(`[TagVectorManager] ✅ Batch rebuild completed successfully`);
             
@@ -1838,13 +1882,30 @@ class TagVectorManager {
     }
 
     /**
-     * 🚀 完全非阻塞的并发批量向量化（使用专用Worker + 异步checkpoint）
+     * 🚀 完全非阻塞的并发批量向量化（使用专用Worker，NO checkpoint阻塞）
      */
     async vectorizeTagBatch(tags) {
         const batchSize = this.config.tagBatchSize;
         const concurrency = parseInt(process.env.TAG_VECTORIZE_CONCURRENCY) || 5;
         
         console.log(`[TagVectorManager] 🚀 Starting NON-BLOCKING vectorization: ${tags.length} tags (concurrency: ${concurrency})...`);
+        
+        // ✅ 致命Bug修复：预先计算并标记将要写入的shard（防止竞态丢失）
+        const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
+        const currentVectorizedTags = Array.from(this.globalTags.entries())
+            .filter(([_, data]) => data.vector !== null);
+        const shardCount = Math.max(1, Math.ceil((currentVectorizedTags.length + tags.length) / SHARD_SIZE));
+        
+        // ✅ 关键：向量化开始前就标记脏shard，即使向量还未生成
+        const affectedShards = new Set();
+        for (const tag of tags) {
+            const shardIndex = this.getShardIndexForTag(tag, shardCount);
+            affectedShards.add(shardIndex);
+        }
+        
+        // ✅ 立即标记，防止保存操作跳过这些shard
+        affectedShards.forEach(idx => this.dirtyShards.add(idx));
+        console.log(`[TagVectorManager] 🎯 Pre-marked ${affectedShards.size} shards as dirty (防止竞态丢失)`);
         
         // 🚀 使用向量化Worker（完全非阻塞）
         if (this.vectorizeWorker) {
@@ -1857,27 +1918,16 @@ class TagVectorManager {
                 );
                 
                 // 写入内存
-                const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
-                const currentVectorizedTags = Array.from(this.globalTags.entries())
-                    .filter(([_, data]) => data.vector !== null);
-                const shardCount = Math.max(1, Math.ceil(currentVectorizedTags.length / SHARD_SIZE));
-                
                 for (let i = 0; i < tags.length; i++) {
                     const tag = tags[i];
                     const tagData = this.globalTags.get(tag);
                     if (tagData && vectors[i]) {
                         tagData.vector = vectors[i];
-                        
-                        // 标记脏shard
-                        const shardIndex = this.getShardIndexForTag(tag, shardCount);
-                        this.dirtyShards.add(shardIndex);
+                        this.dirtyTags.add(tag);
                     }
                 }
                 
-                console.log(`[TagVectorManager] ✅ NON-BLOCKING vectorization completed: ${vectors.length} vectors`);
-                
-                // ✅ 关键修复：触发异步保存，不等待完成
-                this._triggerAsyncCheckpoint();
+                console.log(`[TagVectorManager] ✅ NON-BLOCKING vectorization completed: ${vectors.length} vectors, ${this.dirtyShards.size} dirty shards`);
                 
                 return;
             } catch (error) {
@@ -1885,12 +1935,14 @@ class TagVectorManager {
             }
         }
         
-        // 回退：传统同步模式（但仍然使用异步checkpoint）
+        // 回退：传统同步模式（脏shard已在函数开始时预先标记）
         console.log(`[TagVectorManager] Using fallback sync vectorization...`);
         const batches = [];
         for (let i = 0; i < tags.length; i += batchSize) {
             batches.push(tags.slice(i, i + batchSize));
         }
+        
+        let processedTags = 0;
         
         for (let i = 0; i < batches.length; i++) {
             const batch = batches[i];
@@ -1902,6 +1954,8 @@ class TagVectorManager {
                     const tagData = this.globalTags.get(tag);
                     if (tagData) {
                         tagData.vector = vectors[j];
+                        this.dirtyTags.add(tag);
+                        processedTags++;
                     }
                 }
                 
@@ -1915,49 +1969,7 @@ class TagVectorManager {
             }
         }
         
-        // 标记脏shard
-        const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
-        const currentVectorizedTags = Array.from(this.globalTags.entries())
-            .filter(([_, data]) => data.vector !== null);
-        const shardCount = Math.max(1, Math.ceil(currentVectorizedTags.length / SHARD_SIZE));
-        
-        for (const tag of tags) {
-            const tagData = this.globalTags.get(tag);
-            if (tagData && tagData.vector) {
-                const shardIndex = this.getShardIndexForTag(tag, shardCount);
-                this.dirtyShards.add(shardIndex);
-            }
-        }
-        
-        // ✅ 异步checkpoint
-        this._triggerAsyncCheckpoint();
-    }
-    
-    /**
-     * 🚀 触发异步checkpoint（不阻塞向量化）
-     */
-    _triggerAsyncCheckpoint() {
-        // 防抖：避免频繁触发
-        if (this._checkpointTimer) {
-            clearTimeout(this._checkpointTimer);
-        }
-        
-        this._checkpointTimer = setTimeout(() => {
-            this._checkpointTimer = null;
-            
-            // 异步保存，不等待完成
-            const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
-            const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
-            
-            const vectorizedCount = Array.from(this.globalTags.values()).filter(d => d.vector !== null).length;
-            console.log(`[TagVectorManager] 💾 [Background] Async checkpoint triggered: ${vectorizedCount} vectors`);
-            
-            this.saveGlobalTagLibrary(indexPath, dataPath, true).then(() => {
-                console.log(`[TagVectorManager] ✅ [Background] Async checkpoint completed`);
-            }).catch(err => {
-                console.error(`[TagVectorManager] ❌ [Background] Async checkpoint failed:`, err.message);
-            });
-        }, 5000); // 5秒防抖
+        console.log(`[TagVectorManager] ✅ Sync vectorization completed: ${processedTags} vectors, ${this.dirtyShards.size} dirty shards (pre-marked)`);
     }
 
     /**
