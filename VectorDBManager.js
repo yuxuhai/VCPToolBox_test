@@ -387,13 +387,16 @@ class VectorDBManager {
                 } else {
                     // 差异≤10%：通过diff修复（信任数据库，同步索引）
                     console.log(`[VectorDB] → Minor inconsistency (${diff} chunks), will sync index with database through diff`);
-                    // ✅ 异步修复，不阻塞启动
-                    setImmediate(() => {
-                        this.syncIndexWithDatabase(diaryName).catch(err => {
-                            console.error(`[VectorDB] Failed to sync index for "${diaryName}":`, err.message);
-                        });
-                    });
-                    return false; // 已处理，无需触发更新
+                    // ✅ 同步修复，确保完成后再继续
+                    try {
+                        await this.syncIndexWithDatabase(diaryName);
+                        console.log(`[VectorDB] ✅ Index synced successfully for "${diaryName}"`);
+                        return false; // 修复完成，无需触发更新
+                    } catch (err) {
+                        console.error(`[VectorDB] Failed to sync index for "${diaryName}":`, err.message);
+                        console.log(`[VectorDB] → Will trigger full rebuild as fallback`);
+                        return true; // 修复失败，触发完整重建
+                    }
                 }
             }
         } catch (error) {
