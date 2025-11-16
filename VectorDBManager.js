@@ -360,7 +360,7 @@ class VectorDBManager {
         }
 
         // ✅ 步骤3：检查数据一致性（索引 vs 数据库）
-        // ⚠️ 性能优化：启动时只快速检查，发现问题后台异步修复
+        // ⚠️ 关键优化：根据差异大小决定修复策略
         try {
             const dimensions = 768;
             const tempIndex = new HierarchicalNSW('l2', dimensions);
@@ -368,44 +368,49 @@ class VectorDBManager {
             const indexElementCount = tempIndex.getCurrentCount();
             
             if (Math.abs(indexElementCount - dbChunkCount) > 0) {
-                console.warn(`[VectorDB] Data inconsistency for "${diaryName}": index=${indexElementCount}, db=${dbChunkCount}`);
-                console.log(`[VectorDB] → Scheduling async repair in background`);
-                // ✅ 异步修复，不阻塞启动
-                setImmediate(() => {
-                    this.rebuildIndexFromDatabase(diaryName).catch(err => {
-                        console.error(`[VectorDB] Background repair failed for "${diaryName}":`, err.message);
-                        // ✅ Bug修复2：检查activeWorkers状态再启动Worker
-                        if (!this.activeWorkers.has(diaryName)) {
-                            const workerStarted = this.runFullRebuildWorker(diaryName);
-                            if (!workerStarted) {
-                                console.error(`[VectorDB] Failed to start recovery worker for "${diaryName}"`);
-                            }
-                        } else {
-                            console.log(`[VectorDB] "${diaryName}" is already being processed, skip recovery`);
-                        }
+                const diff = Math.abs(indexElementCount - dbChunkCount);
+                const diffRatio = dbChunkCount > 0 ? diff / dbChunkCount : 1.0;
+                
+                console.warn(`[VectorDB] Data inconsistency for "${diaryName}": index=${indexElementCount}, db=${dbChunkCount} (diff=${diff}, ${(diffRatio*100).toFixed(1)}%)`);
+                
+                // ✅ 根据差异大小决定策略
+                if (diffRatio > 0.1) {
+                    // 差异>10%：删除索引，触发完整重建
+                    console.log(`[VectorDB] → Large inconsistency (${(diffRatio*100).toFixed(1)}%), deleting index to trigger rebuild`);
+                    try {
+                        await fs.unlink(indexPath);
+                        console.log(`[VectorDB] ✅ Stale index deleted, will trigger full rebuild`);
+                    } catch (unlinkError) {
+                        console.error(`[VectorDB] Failed to delete index:`, unlinkError.message);
+                    }
+                    return true; // 触发重建
+                } else {
+                    // 差异≤10%：通过diff修复（信任数据库，同步索引）
+                    console.log(`[VectorDB] → Minor inconsistency (${diff} chunks), will sync index with database through diff`);
+                    // ✅ 异步修复，不阻塞启动
+                    setImmediate(() => {
+                        this.syncIndexWithDatabase(diaryName).catch(err => {
+                            console.error(`[VectorDB] Failed to sync index for "${diaryName}":`, err.message);
+                        });
                     });
-                });
-                return false; // 已经处理，不需要再触发更新
+                    return false; // 已处理，无需触发更新
+                }
             }
         } catch (error) {
             console.error(`[VectorDB] Failed to read index for "${diaryName}":`, error.message);
-            console.log(`[VectorDB] → Scheduling async rebuild in background`);
-            // ✅ 异步重建，不阻塞启动
-            setImmediate(() => {
-                this.rebuildIndexFromDatabase(diaryName).catch(err => {
-                    console.error(`[VectorDB] Background rebuild failed for "${diaryName}":`, err.message);
-                    // ✅ Bug修复2：检查activeWorkers状态再启动Worker
-                    if (!this.activeWorkers.has(diaryName)) {
-                        const workerStarted = this.runFullRebuildWorker(diaryName);
-                        if (!workerStarted) {
-                            console.error(`[VectorDB] Failed to start recovery worker for "${diaryName}"`);
-                        }
-                    } else {
-                        console.log(`[VectorDB] "${diaryName}" is already being processed, skip recovery`);
-                    }
-                });
-            });
-            return false; // 已经处理
+            console.log(`[VectorDB] → Deleting corrupted index file`);
+            
+            // ✅ 索引损坏：删除并触发重建
+            try {
+                await fs.unlink(indexPath);
+                console.log(`[VectorDB] ✅ Corrupted index deleted, will trigger rebuild`);
+            } catch (unlinkError) {
+                if (unlinkError.code !== 'ENOENT') {
+                    console.error(`[VectorDB] Failed to delete index:`, unlinkError.message);
+                }
+            }
+            
+            return true; // 触发重建
         }
 
         // ✅ 步骤4：检查文件变化（用于判断是否需要增量更新）
@@ -1170,6 +1175,9 @@ class VectorDBManager {
             const safeFileNameBase = Buffer.from(diaryName, 'utf-8').toString('base64url');
             const indexPath = path.join(VECTOR_STORE_PATH, `${safeFileNameBase}.bin`);
             
+            // ✅ 关键修复：检查索引文件是否存在
+            const indexExists = await this.fileExists(indexPath);
+            
             // ✅ 使用时间戳命名备份文件，避免冲突
             const timestamp = Date.now();
             const backupIndexPath = `${indexPath}.backup.${timestamp}`;
@@ -1177,7 +1185,7 @@ class VectorDBManager {
             // 第一阶段：创建索引备份（只备份索引文件，不再备份JSON）
             let hasBackup = false;
             try {
-                if (await this.fileExists(indexPath)) {
+                if (indexExists) {
                     await fs.copyFile(indexPath, backupIndexPath);
                     hasBackup = true;
                     this.debugLog(`Created backup: ${path.basename(backupIndexPath)}`);
@@ -1193,17 +1201,13 @@ class VectorDBManager {
             
             // 如果内存中没有，尝试从数据库加载
             if (!index || !chunkMap) {
-                try {
-                    await fs.access(indexPath);
-                    
-                    // ✅ 从数据库加载chunkMap
-                    chunkMap = this.storage.getChunkMap(diaryName);
-                    
-                    // 索引稍后按需加载
-                    this.debugLog(`Found existing data for "${diaryName}", will load index if needed.`);
-                } catch (e) {
-                    this.debugLog(`No existing index found for "${diaryName}", will create new one if needed.`);
-                    chunkMap = {}; // ✅ 初始化为空对象
+                // ✅ 从数据库加载chunkMap（总是可用）
+                chunkMap = this.storage.getChunkMap(diaryName);
+                
+                if (indexExists) {
+                    this.debugLog(`Found existing index file for "${diaryName}", will load if needed.`);
+                } else {
+                    this.debugLog(`No index file for "${diaryName}", will create new one.`);
                 }
             }
             
@@ -1226,11 +1230,21 @@ class VectorDBManager {
                 }
             }
 
-            // 如果既没有有效新增，也没有删除，直接返回
+            // ✅ 修复：如果索引文件缺失但数据库有数据，强制重建索引
+            const dbHasData = Object.keys(chunkMap).length > 0;
+            
             if (validChunksToAdd.length === 0 && labelsToDelete.length === 0) {
-                console.log(`[VectorDB] No valid changes for "${diaryName}". Updating database only.`);
-                this.storage.updateFileHashes(diaryName, newFileHashes);
-                return;
+                // 检查是否需要修复缺失的索引文件
+                if (!indexExists && dbHasData) {
+                    console.log(`[VectorDB] Index file missing for "${diaryName}" but database has ${Object.keys(chunkMap).length} chunks. Rebuilding index...`);
+                    // ✅ 触发原子修复（不阻塞，标记为需要处理）
+                    shouldTriggerFullRebuild = true;
+                    return; // 提前返回，让finally块处理
+                } else {
+                    console.log(`[VectorDB] No valid changes for "${diaryName}". Updating database only.`);
+                    this.storage.updateFileHashes(diaryName, newFileHashes);
+                    return;
+                }
             }
 
             // 初始化索引（如果需要）
@@ -1935,6 +1949,122 @@ class VectorDBManager {
             return false;
         }
     }
+    /**
+     * ✅ 新增：智能同步索引与数据库（基于差异diff修复）
+     * 只处理缺失的chunk，不重新embedding已有数据
+     */
+    async syncIndexWithDatabase(diaryName) {
+        await this.acquireLock(diaryName);
+        try {
+            console.log(`[VectorDB] Syncing index with database for "${diaryName}"...`);
+            
+            const safeFileNameBase = Buffer.from(diaryName, 'utf-8').toString('base64url');
+            const indexPath = path.join(VECTOR_STORE_PATH, `${safeFileNameBase}.bin`);
+            
+            // 从数据库加载完整数据
+            const chunkMap = this.storage.getChunkMap(diaryName);
+            const dbLabels = new Set(Object.keys(chunkMap).map(Number));
+            
+            if (dbLabels.size === 0) {
+                console.warn(`[VectorDB] No chunks in database for "${diaryName}", skipping sync`);
+                return;
+            }
+            
+            // 尝试加载现有索引
+            let index = null;
+            let indexLabels = new Set();
+            
+            try {
+                // 获取dimensions
+                const dummyText = Object.values(chunkMap)[0].text;
+                const cleanedText = this.prepareTextForEmbedding(dummyText);
+                const dummyEmbedding = await this.getEmbeddingsWithRetry([cleanedText]);
+                const dimensions = dummyEmbedding[0].length;
+                
+                index = new HierarchicalNSW('l2', dimensions);
+                index.readIndexSync(indexPath);
+                
+                // 收集索引中的labels
+                for (const label of dbLabels) {
+                    try {
+                        index.getPoint(label);
+                        indexLabels.add(label);
+                    } catch (e) {
+                        // label不存在
+                    }
+                }
+                
+                console.log(`[VectorDB] Index has ${indexLabels.size}/${dbLabels.size} chunks from database`);
+            } catch (e) {
+                console.log(`[VectorDB] Cannot load index, will create new one`);
+            }
+            
+            // 计算需要添加的chunks（在数据库中但不在索引中）
+            const missingLabels = Array.from(dbLabels).filter(l => !indexLabels.has(l));
+            
+            if (missingLabels.length === 0 && indexLabels.size === dbLabels.size) {
+                console.log(`[VectorDB] Index and database are already in sync for "${diaryName}"`);
+                return;
+            }
+            
+            console.log(`[VectorDB] Need to add ${missingLabels.length} missing chunks to index`);
+            
+            // 只对缺失的chunks获取embedding
+            const missingChunks = missingLabels.map(label => {
+                const data = chunkMap[label];
+                return this.prepareTextForEmbedding(data.text);
+            });
+            
+            const vectors = await this.getEmbeddingsWithRetry(missingChunks);
+            
+            if (vectors.length !== missingLabels.length) {
+                throw new Error(`Embedding count mismatch: expected ${missingLabels.length}, got ${vectors.length}`);
+            }
+            
+            // 如果没有索引，创建新的
+            if (!index) {
+                const dimensions = vectors[0].length;
+                index = new HierarchicalNSW('l2', dimensions);
+                index.initIndex(dbLabels.size);
+                
+                // 先添加所有已存在的chunks（需要重新embedding）
+                console.log(`[VectorDB] Creating new index with ${dbLabels.size} chunks...`);
+                const allTexts = Array.from(dbLabels).map(label => 
+                    this.prepareTextForEmbedding(chunkMap[label].text)
+                );
+                const allVectors = await this.getEmbeddingsWithRetry(allTexts);
+                
+                const sortedLabels = Array.from(dbLabels).sort((a, b) => a - b);
+                for (let i = 0; i < allVectors.length; i++) {
+                    index.addPoint(allVectors[i], sortedLabels[i]);
+                }
+            } else {
+                // 只添加缺失的chunks
+                for (let i = 0; i < missingLabels.length; i++) {
+                    try {
+                        index.addPoint(vectors[i], missingLabels[i]);
+                    } catch (e) {
+                        console.error(`[VectorDB] Failed to add point ${missingLabels[i]}:`, e.message);
+                    }
+                }
+            }
+            
+            // 保存索引文件
+            await index.writeIndex(indexPath);
+            
+            // 更新内存
+            this.indices.set(diaryName, index);
+            this.chunkMaps.set(diaryName, chunkMap);
+            
+            console.log(`[VectorDB] ✅ Index synced with database for "${diaryName}" (${dbLabels.size} chunks, added ${missingLabels.length} missing)`);
+        } catch (error) {
+            console.error(`[VectorDB] Failed to sync index for "${diaryName}":`, error);
+            throw error;
+        } finally {
+            this.releaseLock(diaryName);
+        }
+    }
+
 
     /**
      * ✅ 新增：从数据库重建索引（原子化修复，无需重新扫描文件）
