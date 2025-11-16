@@ -323,6 +323,20 @@ class VectorDBStorage {
     }
 
     /**
+     * ✅ 高效获取chunk数量（不加载数据）
+     * 专为大型数据集优化，避免加载所有chunk到内存
+     */
+    getChunkCount(diaryName) {
+        this._ensureInitialized();
+        const diaryId = this.getOrCreateDiary(diaryName);
+        const select = this.db.prepare(
+            'SELECT COUNT(*) as count FROM chunks WHERE diary_id = ?'
+        );
+        const result = select.get(diaryId);
+        return result ? result.count : 0;
+    }
+
+    /**
      * 批量保存chunks（事务处理）
      */
     saveChunks(diaryName, chunkMap) {

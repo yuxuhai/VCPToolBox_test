@@ -428,52 +428,72 @@ class VectorDBManager {
 
     async scanAndSyncAll() {
         console.log('[VectorDB] Scanning all diary books for updates...');
-        const diaryBooks = await fs.readdir(DIARY_ROOT_PATH, { withFileTypes: true });
         
-        // ✅ 批量处理，避免并发问题
-        const updateTasks = [];
-        
-        // ✅ 新增：收集当前存在的日记本名称
-        const currentDiaryNames = new Set();
-        
-        for (const dirent of diaryBooks) {
-            if (dirent.isDirectory()) {
-                const diaryName = dirent.name;
-                if (diaryName.startsWith('已整理') || diaryName === 'VCP论坛') {
-                    console.log(`[VectorDB] Ignoring folder "${diaryName}" as it is in the exclusion list.`);
-                    continue;
-                }
-                
-                currentDiaryNames.add(diaryName);
-                const diaryPath = path.join(DIARY_ROOT_PATH, diaryName);
-                
-                const needsUpdate = await this.checkIfUpdateNeeded(diaryName, diaryPath);
-                if (needsUpdate) {
-                    console.log(`[VectorDB] Changes detected in "${diaryName}", will schedule update.`);
-                    updateTasks.push(diaryName);
-                } else {
-                    console.log(`[VectorDB] "${diaryName}" is up-to-date. Index will be loaded on demand.`);
+        try {
+            const diaryBooks = await fs.readdir(DIARY_ROOT_PATH, { withFileTypes: true });
+            
+            // ✅ 批量处理，避免并发问题
+            const updateTasks = [];
+            
+            // ✅ 新增：收集当前存在的日记本名称
+            const currentDiaryNames = new Set();
+            
+            console.log(`[VectorDB] Found ${diaryBooks.length} items in diary root path`);
+            
+            for (const dirent of diaryBooks) {
+                if (dirent.isDirectory()) {
+                    const diaryName = dirent.name;
+                    if (diaryName.startsWith('已整理') || diaryName === 'VCP论坛') {
+                        this.debugLog(`Ignoring folder "${diaryName}" as it is in the exclusion list.`);
+                        continue;
+                    }
+                    
+                    currentDiaryNames.add(diaryName);
+                    const diaryPath = path.join(DIARY_ROOT_PATH, diaryName);
+                    
+                    console.log(`[VectorDB] Checking if update needed for "${diaryName}"...`);
+                    const needsUpdate = await this.checkIfUpdateNeeded(diaryName, diaryPath);
+                    if (needsUpdate) {
+                        console.log(`[VectorDB] Changes detected in "${diaryName}", will schedule update.`);
+                        updateTasks.push(diaryName);
+                    } else {
+                        console.log(`[VectorDB] "${diaryName}" is up-to-date. Index will be loaded on demand.`);
+                    }
                 }
             }
-        }
-        
-        // ✅ 新增：清理数据库中已删除的日记本
-        const dbDiaryNames = this.storage.getAllDiaryNames();
-        for (const dbDiaryName of dbDiaryNames) {
-            if (!currentDiaryNames.has(dbDiaryName)) {
-                console.log(`[VectorDB] Found orphaned database entry for deleted diary "${dbDiaryName}". Cleaning up...`);
-                await this.cleanupDeletedDiary(dbDiaryName);
+            
+            console.log(`[VectorDB] Finished checking all diaries. Found ${updateTasks.length} that need updates.`);
+            
+            // ✅ 新增：清理数据库中已删除的日记本
+            const dbDiaryNames = this.storage.getAllDiaryNames();
+            console.log(`[VectorDB] Checking for orphaned database entries (${dbDiaryNames.length} in DB, ${currentDiaryNames.size} on disk)...`);
+            
+            for (const dbDiaryName of dbDiaryNames) {
+                if (!currentDiaryNames.has(dbDiaryName)) {
+                    console.log(`[VectorDB] Found orphaned database entry for deleted diary "${dbDiaryName}". Cleaning up...`);
+                    await this.cleanupDeletedDiary(dbDiaryName);
+                }
             }
-        }
-        
-        // ✅ 统一调度更新任务
-        console.log(`[VectorDB] Scheduling ${updateTasks.length} diary books for update.`);
-        for (const diaryName of updateTasks) {
-            this.scheduleDiaryBookProcessing(diaryName);
+            
+            // ✅ 统一调度更新任务（非阻塞）
+            console.log(`[VectorDB] Scheduling ${updateTasks.length} diary books for update...`);
+            for (const diaryName of updateTasks) {
+                // ⚠️ 关键修复：不等待调度完成，让它异步执行
+                this.scheduleDiaryBookProcessing(diaryName).catch(err => {
+                    console.error(`[VectorDB] Failed to schedule processing for "${diaryName}":`, err);
+                });
+            }
+            
+            console.log(`[VectorDB] ✅ scanAndSyncAll completed successfully`);
+        } catch (error) {
+            console.error(`[VectorDB] ❌ scanAndSyncAll failed:`, error);
+            throw error;
         }
     }
 
     async checkIfUpdateNeeded(diaryName, diaryPath) {
+        console.log(`[VectorDB] Checking update needed for "${diaryName}"...`);
+        
         // ✅ 检查是否在暂停期
         if (this.storage.isRebuildPaused(diaryName)) {
             this.debugLog(`[VectorDB] Update check for "${diaryName}" is paused`);
@@ -484,9 +504,11 @@ class VectorDBManager {
         const indexPath = path.join(VECTOR_STORE_PATH, `${safeFileNameBase}.bin`);
         const indexExists = await this.fileExists(indexPath);
         
-        // ✅ 步骤1：检查数据库是否有数据
-        const chunkMap = this.storage.getChunkMap(diaryName);
-        const dbChunkCount = Object.keys(chunkMap).length;
+        console.log(`[VectorDB] Index exists for "${diaryName}": ${indexExists}`);
+        
+        // ✅ 步骤1：检查数据库是否有数据（优化：只获取数量，不加载全部数据）
+        const dbChunkCount = this.storage.getChunkCount(diaryName);
+        console.log(`[VectorDB] Database chunk count for "${diaryName}": ${dbChunkCount}`);
         
         // ✅ 情况1：数据库为空 → Full Rebuild（第一次构建）
         if (dbChunkCount === 0) {
@@ -504,11 +526,14 @@ class VectorDBManager {
 
         // ✅ 步骤3：检查数据一致性（索引 vs 数据库）
         // ⚠️ 关键优化：根据差异大小决定修复策略
+        console.log(`[VectorDB] Checking data consistency for "${diaryName}"...`);
         try {
             // ✅ 使用初始化时缓存的维度（金标准）
             const tempIndex = new HierarchicalNSW('l2', this.embeddingDimensions);
+            console.log(`[VectorDB] Reading index file for "${diaryName}"...`);
             tempIndex.readIndexSync(indexPath);
             const indexElementCount = tempIndex.getCurrentCount();
+            console.log(`[VectorDB] Index element count for "${diaryName}": ${indexElementCount}`);
             
             if (Math.abs(indexElementCount - dbChunkCount) > 0) {
                 const diff = Math.abs(indexElementCount - dbChunkCount);
@@ -530,8 +555,16 @@ class VectorDBManager {
                 } else {
                     // 差异≤10%：通过diff修复（信任数据库，同步索引）
                     console.log(`[VectorDB] → Minor inconsistency (${diff} chunks), will sync index with database through diff`);
-                    // ✅ 同步修复，确保完成后再继续
+                    // ✅ 关键修复：对大型数据集，异步修复，不阻塞初始化
+                    if (dbChunkCount > 100000) {
+                        console.log(`[VectorDB] ⚠️ Large dataset detected (${dbChunkCount} chunks), skipping sync during initialization`);
+                        console.log(`[VectorDB] Index will be lazily loaded and synced on first use`);
+                        return false; // 延迟修复，不阻塞初始化
+                    }
+                    
+                    // ✅ 小型数据集：同步修复
                     try {
+                        console.log(`[VectorDB] Starting sync for "${diaryName}"...`);
                         await this.syncIndexWithDatabase(diaryName);
                         console.log(`[VectorDB] ✅ Index synced successfully for "${diaryName}"`);
                         return false; // 修复完成，无需触发更新
