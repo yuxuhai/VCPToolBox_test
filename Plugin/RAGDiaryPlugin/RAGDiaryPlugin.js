@@ -727,9 +727,15 @@ class RAGDiaryPlugin {
             }
 
             if (!queryVector) {
-                console.error('[RAGDiaryPlugin] 查询向量化失败，跳过RAG处理。');
-                console.error('[RAGDiaryPlugin] userContent length:', userContent?.length);
-                console.error('[RAGDiaryPlugin] aiContent length:', aiContent?.length);
+                // 检查是否是系统提示导致的空内容（这是正常情况）
+                const isSystemPrompt = !userContent || userContent.length === 0;
+                if (isSystemPrompt) {
+                    console.log('[RAGDiaryPlugin] 检测到系统提示消息，无需向量化，跳过RAG处理。');
+                } else {
+                    console.error('[RAGDiaryPlugin] 查询向量化失败，跳过RAG处理。');
+                    console.error('[RAGDiaryPlugin] userContent length:', userContent?.length);
+                    console.error('[RAGDiaryPlugin] aiContent length:', aiContent?.length);
+                }
                 // 安全起见，移除所有占位符
                 const newMessages = JSON.parse(JSON.stringify(messages));
                 for (const index of targetSystemMessageIndices) {

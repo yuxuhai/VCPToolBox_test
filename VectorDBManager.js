@@ -983,14 +983,17 @@ class VectorDBManager {
         });
 
         const handleFileChange = (filePath) => {
-            console.log(`[VectorDB] File change detected: ${filePath}`);
+            // ✅ 优化：先提取 diary name，再检查是否应该忽略（避免打印不必要的日志）
             const diaryName = path.basename(path.dirname(filePath));
-            console.log(`[VectorDB] Extracted diary name: "${diaryName}" from path: ${filePath}`);
             
+            // ✅ 提前过滤：如果是排除的文件夹，直接返回，不打印任何日志
             if (diaryName.startsWith('已整理') || diaryName === 'VCP论坛') {
-                console.log(`[VectorDB] Ignoring excluded diary: "${diaryName}"`);
                 return;
             }
+            
+            // ✅ 只有非排除的文件才打印日志
+            console.log(`[VectorDB] File change detected: ${filePath}`);
+            console.log(`[VectorDB] Extracted diary name: "${diaryName}" from path: ${filePath}`);
             
             // ✅ 如果已经在处理中，忽略文件变更
             if (this.activeWorkers.has(diaryName)) {
@@ -1065,18 +1068,19 @@ class VectorDBManager {
 
         watcher
             .on('add', (filePath) => {
-                console.log(`[VectorDB] Event: 'add' - ${filePath}`);
+                // ✅ 优化：不在这里打印日志，交由 handleFileChange 统一处理
                 handleFileChange(filePath);
             })
             .on('change', (filePath) => {
-                console.log(`[VectorDB] Event: 'change' - ${filePath}`);
+                // ✅ 优化：不在这里打印日志，交由 handleFileChange 统一处理
                 handleFileChange(filePath);
             })
             .on('unlink', (filePath) => {
-                console.log(`[VectorDB] Event: 'unlink' - ${filePath}`);
+                // ✅ 优化：不在这里打印日志，交由 handleFileChange 统一处理
                 handleFileChange(filePath);
             })
             .on('unlinkDir', (dirPath) => {
+                // ✅ 目录删除事件仍需打印日志（重要操作）
                 console.log(`[VectorDB] Event: 'unlinkDir' - ${dirPath}`);
                 handleDirUnlink(dirPath);
             });
