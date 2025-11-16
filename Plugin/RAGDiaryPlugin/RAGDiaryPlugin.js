@@ -721,7 +721,7 @@ class RAGDiaryPlugin {
 
             let queryVector = null;
             if (aiVector && userVector) {
-                queryVector = this._getWeightedAverageVector([userVector, aiVector], [0.85, 0.15]);
+                queryVector = this._getWeightedAverageVector([userVector, aiVector], [0.7, 0.3]);
             } else {
                 queryVector = userVector || aiVector;
             }
