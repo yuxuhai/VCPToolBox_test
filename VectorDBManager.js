@@ -1501,12 +1501,44 @@ class VectorDBManager {
                 });
                 
                 // ✅ 修复：回滚数据库（因为索引文件保存失败）
+                let rollbackSuccess = false;
                 try {
                     console.log(`[VectorDB] Rolling back database changes for "${diaryName}"`);
                     this.storage.saveChunks(diaryName, originalChunkMap);
-                    console.log(`[VectorDB] Database rollback successful`);
+                    
+                    // ✅ 验证回滚是否成功
+                    const verifyChunkMap = this.storage.getChunkMap(diaryName);
+                    if (Object.keys(verifyChunkMap).length === Object.keys(originalChunkMap).length) {
+                        console.log(`[VectorDB] ✅ Database rollback successful and verified`);
+                        rollbackSuccess = true;
+                    } else {
+                        throw new Error(`Rollback verification failed: expected ${Object.keys(originalChunkMap).length}, got ${Object.keys(verifyChunkMap).length}`);
+                    }
                 } catch (dbRollbackError) {
-                    console.error(`[VectorDB] Failed to rollback database:`, dbRollbackError.message);
+                    console.error(`[VectorDB] ❌ CRITICAL: Database rollback failed for "${diaryName}":`, dbRollbackError.message);
+                    console.error(`[VectorDB] ⚠️ Data inconsistency detected! Marking for full rebuild.`);
+                    
+                    // ✅ 回滚失败的补救措施：标记需要完整重建
+                    try {
+                        // 删除损坏的索引文件（如果存在）
+                        const safeFileNameBase = Buffer.from(diaryName, 'utf-8').toString('base64url');
+                        const indexPath = path.join(VECTOR_STORE_PATH, `${safeFileNameBase}.bin`);
+                        if (await this.fileExists(indexPath)) {
+                            await fs.unlink(indexPath);
+                            console.log(`[VectorDB] Deleted inconsistent index file`);
+                        }
+                        
+                        // 清除内存缓存
+                        this.indices.delete(diaryName);
+                        this.chunkMaps.delete(diaryName);
+                        
+                        // 记录失败，触发后续重建
+                        this.storage.recordFailedRebuild(diaryName, `Data inconsistency after rollback failure: ${dbRollbackError.message}`);
+                        
+                        console.error(`[VectorDB] ⚠️ "${diaryName}" marked for full rebuild due to data inconsistency`);
+                    } catch (recoveryError) {
+                        console.error(`[VectorDB] ❌ Recovery attempt also failed:`, recoveryError.message);
+                    }
                 }
                 
                 // 清理临时文件
@@ -1519,7 +1551,12 @@ class VectorDBManager {
                     console.warn(`[VectorDB] Failed to cleanup temp file:`, cleanupError.message);
                 }
                 
-                throw writeError;
+                // ✅ 如果回滚成功，抛出原始错误；如果失败，抛出更严重的错误
+                if (rollbackSuccess) {
+                    throw writeError;
+                } else {
+                    throw new Error(`CRITICAL: Write failed AND rollback failed for "${diaryName}". Full rebuild required. Original error: ${writeError.message}`);
+                }
             }
             
             // ✅ 只有在写入成功后才清理备份
@@ -2547,19 +2584,28 @@ async function processSingleDiaryBookInWorker(diaryName, config) {
                     throw new Error(`Embedding count mismatch for file "${file}": expected ${fileChunks.length}, got ${fileVectors.length}`);
                 }
             } catch (error) {
-                // ✅ 特殊处理：遇到429限流错误时优雅退出
-                if (error.isRateLimitError) {
-                    console.warn(`[VectorDB][Worker] ⏸️ Rate limit encountered while processing "${file}"`);
-                    console.warn(`[VectorDB][Worker] Progress saved: ${processedFiles.size}/${relevantFiles.length} files completed`);
-                    console.warn(`[VectorDB][Worker] Next file to process: "${file}"`);
-                    
-                    // 保存当前进度（不包括当前失败的文件）
-                    if (processedFiles.size > 0) {
+                // ✅ 核心修复：在处理任何错误之前，先保存已完成的进度
+                // 这确保了即使发生OOM、系统kill、网络错误等崩溃，已处理的数据也不会丢失
+                console.error(`[VectorDB][Worker] ❌ Error while processing "${file}":`, error.message);
+                
+                if (processedFiles.size > 0 && index) {
+                    console.warn(`[VectorDB][Worker] 💾 Saving progress before handling error...`);
+                    try {
                         await index.writeIndex(indexPath);
                         storage.saveChunks(diaryName, chunkMap);
                         storage.saveBuildProgress(diaryName, Array.from(processedFiles), relevantFiles.length, Array.from(processedFiles).pop());
-                        console.log(`[VectorDB][Worker] ✅ Progress checkpoint saved before rate limit pause`);
+                        console.log(`[VectorDB][Worker] ✅ Progress saved: ${processedFiles.size}/${relevantFiles.length} files (${Object.keys(chunkMap).length} chunks)`);
+                    } catch (saveError) {
+                        console.error(`[VectorDB][Worker] ⚠️ Failed to save progress:`, saveError.message);
+                        // 继续处理原始错误
                     }
+                }
+                
+                // ✅ 然后根据错误类型决定如何处理
+                if (error.isRateLimitError) {
+                    // 限流错误：优雅暂停
+                    console.warn(`[VectorDB][Worker] ⏸️ Rate limit encountered - progress already saved`);
+                    console.warn(`[VectorDB][Worker] Next file to process: "${file}"`);
                     
                     storage.close();
                     
@@ -2569,10 +2615,11 @@ async function processSingleDiaryBookInWorker(diaryName, config) {
                     pauseError.processedFiles = processedFiles.size;
                     pauseError.totalFiles = relevantFiles.length;
                     throw pauseError;
+                } else {
+                    // 其他错误：保存后重新抛出
+                    console.error(`[VectorDB][Worker] ❌ Non-recoverable error. Progress has been saved, will retry from file "${file}" on next run.`);
+                    throw error;
                 }
-                
-                // 其他错误正常抛出
-                throw error;
             }
             
             // ✅ 初始化索引（如果还没有）
