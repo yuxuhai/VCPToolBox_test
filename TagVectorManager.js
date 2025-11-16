@@ -929,22 +929,50 @@ class TagVectorManager {
     }
     
     /**
-     * ✅ 实际的保存实现（带完整的原子性和非阻塞优化）
+     * ✅ 实际的保存实现（带完整的原子性和非阻塞优化 + 崩溃防护）
      */
     async _saveGlobalTagLibraryImpl(indexPath, dataPath, incrementalMode = false) {
         console.log('[TagVectorManager] 💾 Starting save operation (non-blocking mode)...');
         const startTime = Date.now();
         
-        // 🦀 如果使用Vexus，保存Rust索引
+        // ✅ 保存前数据验证（防止保存损坏的数据）
+        const tagsWithVectors = Array.from(this.globalTags.entries())
+            .filter(([_, data]) => data.vector !== null);
+        
+        if (tagsWithVectors.length === 0 && this.globalTags.size > 0) {
+            console.error('[TagVectorManager] ❌ FATAL: Attempting to save with 0 vectors but non-zero tags!');
+            console.error('[TagVectorManager] Total tags:', this.globalTags.size);
+            console.error('[TagVectorManager] This indicates data corruption, aborting save to prevent data loss');
+            throw new Error('Data corruption detected: no vectors to save');
+        }
+        
+        console.log(`[TagVectorManager] ✅ Pre-save validation passed: ${tagsWithVectors.length}/${this.globalTags.size} tags have vectors`);
+        
+        // 🦀 如果使用Vexus，保存Rust索引（改进：原子性保存）
         if (this.usingVexus && this.vexus) {
             try {
                 const vexusIndexPath = indexPath.replace('.bin', '_vexus.usearch');
                 const vexusMapPath = dataPath.replace('.json', '_vexus.map');
                 
-                this.vexus.save(vexusIndexPath, vexusMapPath);
-                console.log('[TagVectorManager] 🦀 ✅ Saved Vexus-Lite index');
+                // ✅ 先保存到临时文件
+                const tempVexusIndexPath = vexusIndexPath + '.tmp';
+                const tempVexusMapPath = vexusMapPath + '.tmp';
+                
+                this.vexus.save(tempVexusIndexPath, tempVexusMapPath);
+                
+                // ✅ 验证并原子重命名
+                const fs = require('fs');
+                if (fs.existsSync(tempVexusIndexPath) && fs.existsSync(tempVexusMapPath)) {
+                    await require('fs').promises.rename(tempVexusIndexPath, vexusIndexPath);
+                    await require('fs').promises.rename(tempVexusMapPath, vexusMapPath);
+                    console.log('[TagVectorManager] 🦀 ✅ Vexus index saved atomically');
+                } else {
+                    throw new Error('Vexus temp files not created properly');
+                }
             } catch (vexusError) {
-                console.error('[TagVectorManager] Failed to save Vexus index:', vexusError.message);
+                console.error('[TagVectorManager] ❌ Vexus save failed:', vexusError.message);
+                // ⚠️ Vexus失败不阻止JS索引保存，因为可以重建
+                console.warn('[TagVectorManager] Continuing with JS index save...');
             }
         }
         
@@ -954,7 +982,7 @@ class TagVectorManager {
         
         // ✅ 关键优化：减小分片大小，增加并发度，减少单次阻塞时间
         const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
-        const tagsWithVectors = Array.from(this.globalTags.entries())
+        const currentTagsWithVectors = Array.from(this.globalTags.entries())
             .filter(([_, data]) => data.vector !== null);
         
         // 1. 准备元数据
@@ -987,7 +1015,7 @@ class TagVectorManager {
         const shardCount = Math.max(1, Math.ceil(tagsWithVectors.length / SHARD_SIZE));
         const shardDataList = [];
         
-        console.log(`[TagVectorManager] 📊 Save operation using shardCount: ${shardCount} (${tagsWithVectors.length} vectorized tags)`);
+        console.log(`[TagVectorManager] 📊 Save operation using shardCount: ${shardCount} (${currentTagsWithVectors.length} vectorized tags)`);
         
         if (incrementalMode && this.dirtyShards.size > 0) {
             // 🌟 Diff模式：只重写脏shard
@@ -1013,7 +1041,7 @@ class TagVectorManager {
             // 按tag分组到对应的shard
             const shardMap = new Map(); // shardIndex → {tag: vector}
             
-            for (const [tag, data] of tagsWithVectors) {
+            for (const [tag, data] of currentTagsWithVectors) {
                 const shardIndex = this.getShardIndexForTag(tag, shardCount);
                 
                 // 只处理脏shard
@@ -1072,7 +1100,7 @@ class TagVectorManager {
             
             // 按tag分组到对应的shard
             const shardMap = new Map();
-            for (const [tag, data] of tagsWithVectors) {
+            for (const [tag, data] of currentTagsWithVectors) {
                 const shardIndex = this.getShardIndexForTag(tag, shardCount);
                 if (!shardMap.has(shardIndex)) {
                     shardMap.set(shardIndex, {});
@@ -1173,9 +1201,9 @@ class TagVectorManager {
             if (incrementalMode && this.dirtyShards.size > 0) {
                 // ✅ 关键修复：Diff模式不删除旧shard，只在shardCount变化时清理
                 const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
-                const totalTags = Array.from(this.globalTags.entries())
+                const totalVectorizedTags = Array.from(this.globalTags.entries())
                     .filter(([_, data]) => data.vector !== null).length;
-                const expectedShardCount = Math.ceil(totalTags / SHARD_SIZE);
+                const expectedShardCount = Math.ceil(totalVectorizedTags / SHARD_SIZE);
                 
                 try {
                     const files = await fs.readdir(path.dirname(vectorBasePath));
@@ -1306,8 +1334,14 @@ class TagVectorManager {
                 }
             }
             
-            // 合并数据到临时Map
+            // ✅ 合并数据到临时Map + 数据一致性检查
+            const inconsistentTags = [];
             for (const [tag, meta] of Object.entries(metaData)) {
+                // ✅ 检测数据不一致：元数据标记有向量但实际向量丢失
+                if (meta.hasVector && !allVectorData[tag]) {
+                    inconsistentTags.push(tag);
+                }
+                
                 tempGlobalTags.set(tag, {
                     vector: meta.hasVector && allVectorData[tag] ? new Float32Array(allVectorData[tag]) : null,
                     frequency: meta.frequency,
@@ -1316,6 +1350,15 @@ class TagVectorManager {
             }
             
             console.log(`[TagVectorManager] Loaded from sharded files: ${Object.keys(metaData).length} tags, ${Object.keys(allVectorData).length} vectors`);
+            
+            // ✅ 数据一致性报告
+            if (inconsistentTags.length > 0) {
+                console.error(`[TagVectorManager] ⚠️ DATA CORRUPTION DETECTED!`);
+                console.error(`[TagVectorManager] ${inconsistentTags.length} tags marked hasVector=true but vectors are missing`);
+                console.error(`[TagVectorManager] Sample corrupted tags: ${inconsistentTags.slice(0, 10).join(', ')}`);
+                console.error(`[TagVectorManager] This likely indicates a crash during save operation`);
+                console.warn(`[TagVectorManager] These tags will be re-vectorized in background...`);
+            }
             
         } catch (e) {
             // ✅ 回退到旧格式
