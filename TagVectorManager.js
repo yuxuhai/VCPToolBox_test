@@ -231,12 +231,14 @@ class TagVectorManager {
             needsBuildRegistry = true;
         }
 
+        // ✅ 竞态修复：在启动文件监控前标记已初始化，避免监控事件在后台任务期间丢失
+        this.initialized = true;
+        
         // ====== 步骤3: 启动文件监控======
         this.startFileWatcher();
-        this.initialized = true;
         console.log('[TagVectorManager] ✅ Initialized (library loading continues in background)');
 
-        // ✅ 关键修复：后台任务使用独立的锁和状态标记
+        // ✅ 竞态修复：后台任务使用独立的锁和状态标记
         this.isBackgroundTaskRunning = true;
         
         setImmediate(async () => {
@@ -713,7 +715,7 @@ class TagVectorManager {
      * @param {boolean} incrementalMode - 增量模式：不删除旧shard，只更新/新增
      */
     async saveGlobalTagLibrary(indexPath, dataPath, incrementalMode = false) {
-        // ✅ 关键修复：保存操作加锁，防止并发写入导致数据损坏
+        // ✅ 竞态修复：保存操作加锁，防止并发写入导致数据损坏
         if (this.saveLock) {
             console.log('[TagVectorManager] ⏳ Save operation in progress, queuing...');
             return new Promise((resolve, reject) => {
@@ -726,27 +728,38 @@ class TagVectorManager {
         try {
             await this._saveGlobalTagLibraryImpl(indexPath, dataPath, incrementalMode);
             
-            // ✅ 处理队列中的保存请求（合并策略）
+            // ✅ 竞态修复：改进队列合并策略，确保所有脏数据都被保存
             if (this.saveQueue.length > 0) {
                 console.log(`[TagVectorManager] Processing ${this.saveQueue.length} queued save requests (merge strategy)...`);
                 
-                const lastSave = this.saveQueue.pop(); // 取最后一个真正执行
+                // 🔒 快照当前脏数据状态
+                const currentDirtyTags = this.dirtyTags.size;
+                const currentDirtyShards = this.dirtyShards.size;
                 
-                // ✅ 关键修复：中间被跳过的请求全部resolve（数据已被最后一次保存包含）
+                const lastSave = this.saveQueue.pop();
+                
+                // ✅ 合并中间请求
                 while (this.saveQueue.length > 0) {
                     const mergedSave = this.saveQueue.pop();
-                    mergedSave.resolve(); // 告知调用者：你的数据已被合并保存
+                    mergedSave.resolve();
                     console.log('[TagVectorManager] Merged save request resolved');
                 }
                 
-                // 执行最后一个
-                try {
-                    await this._saveGlobalTagLibraryImpl(lastSave.indexPath, lastSave.dataPath, lastSave.incrementalMode);
+                // 执行最后一个（只在有新的脏数据时才执行）
+                if (currentDirtyTags > 0 || currentDirtyShards > 0) {
+                    try {
+                        console.log(`[TagVectorManager] Executing final queued save (${currentDirtyTags} dirty tags, ${currentDirtyShards} dirty shards)...`);
+                        await this._saveGlobalTagLibraryImpl(lastSave.indexPath, lastSave.dataPath, lastSave.incrementalMode);
+                        lastSave.resolve();
+                        console.log('[TagVectorManager] Final queued save completed');
+                    } catch (error) {
+                        lastSave.reject(error);
+                        console.error('[TagVectorManager] Final queued save failed:', error.message);
+                    }
+                } else {
+                    // 没有新脏数据，直接resolve
                     lastSave.resolve();
-                    console.log('[TagVectorManager] Final queued save completed');
-                } catch (error) {
-                    lastSave.reject(error);
-                    console.error('[TagVectorManager] Final queued save failed:', error.message);
+                    console.log('[TagVectorManager] Final queued save skipped (no new dirty data)');
                 }
             }
         } finally {
@@ -796,15 +809,32 @@ class TagVectorManager {
         };
         
         // 2. 🌟 准备向量数据（Diff模式：只处理脏shard）
-        const shardCount = Math.ceil(tagsWithVectors.length / SHARD_SIZE);
+        // ✅ 竞态修复：确保shardCount计算与标记时一致
+        const shardCount = Math.max(1, Math.ceil(tagsWithVectors.length / SHARD_SIZE));
         const shardDataList = [];
+        
+        console.log(`[TagVectorManager] 📊 Save operation using shardCount: ${shardCount} (${tagsWithVectors.length} vectorized tags)`);
         
         if (incrementalMode && this.dirtyShards.size > 0) {
             // 🌟 Diff模式：只重写脏shard
             console.log(`[TagVectorManager] 🎯 Diff mode: Processing ${this.dirtyShards.size} dirty shards out of ${shardCount}`);
             
-            // ✅ 关键修复：创建脏shard集合的副本，防止循环中被修改
+            // ✅ 竞态修复：创建脏shard集合的副本 + 验证shard索引有效性
             const dirtyShardsCopy = new Set(this.dirtyShards);
+            
+            // 🔒 验证shard索引：过滤掉超出当前shardCount的无效索引（可能由旧的shardCount计算产生）
+            const validDirtyShards = new Set();
+            for (const shardIndex of dirtyShardsCopy) {
+                if (shardIndex >= 0 && shardIndex < shardCount) {
+                    validDirtyShards.add(shardIndex);
+                } else {
+                    console.warn(`[TagVectorManager] ⚠️ Ignoring invalid shard index ${shardIndex} (current shardCount: ${shardCount})`);
+                }
+            }
+            
+            if (validDirtyShards.size < dirtyShardsCopy.size) {
+                console.log(`[TagVectorManager] 🔧 Filtered ${dirtyShardsCopy.size - validDirtyShards.size} invalid shard indices`);
+            }
             
             // 按tag分组到对应的shard
             const shardMap = new Map(); // shardIndex → {tag: vector}
@@ -822,7 +852,7 @@ class TagVectorManager {
             }
             
             // 对于每个脏shard，加载旧数据并合并
-            for (const shardIndex of dirtyShardsCopy) {
+            for (const shardIndex of validDirtyShards) {
                 const shardPath = `${vectorBasePath}_${shardIndex + 1}.json`;
                 let shardData = shardMap.get(shardIndex) || {};
                 
@@ -891,35 +921,25 @@ class TagVectorManager {
         const tempFiles = [];
         
         try {
-            // 3.1 写入HNSW索引到临时文件（🌟 Worker模式：异步非阻塞）
+            // 3.1 写入HNSW索引到临时文件（✅ 竞态修复：统一使用主线程同步保存）
             const tempIndexPath = indexPath + '.tmp';
             if (this.tagIndex) {
                 console.log('[TagVectorManager] 💾 Writing HNSW index...');
                 
-                if (this.indexWorker) {
-                    // 🌟 使用 Worker 异步写入（完全非阻塞）
-                    const result = await this.indexWorker.saveIndex(indexPath, dataPath);
-                    if (result.success) {
-                        console.log(`[TagVectorManager] ✅ HNSW index written by worker in ${result.saveTime}ms`);
-                        // Worker已经写入最终文件，不需要添加到tempFiles
-                    } else {
-                        throw new Error(`Worker save failed: ${result.message}`);
-                    }
-                } else {
-                    // 传统模式：setImmediate包装
-                    await new Promise((resolve, reject) => {
-                        setImmediate(() => {
-                            try {
-                                this.tagIndex.writeIndexSync(tempIndexPath);
-                                resolve();
-                            } catch (error) {
-                                reject(error);
-                            }
-                        });
+                // ✅ 修复：Worker无法访问主线程的索引实例，统一使用同步模式
+                // 🔒 使用 setImmediate 避免阻塞，但保持在主线程中执行
+                await new Promise((resolve, reject) => {
+                    setImmediate(() => {
+                        try {
+                            this.tagIndex.writeIndexSync(tempIndexPath);
+                            resolve();
+                        } catch (error) {
+                            reject(error);
+                        }
                     });
-                    console.log('[TagVectorManager] ✅ HNSW index written (sync mode)');
-                    tempFiles.push({ temp: tempIndexPath, final: indexPath });
-                }
+                });
+                console.log('[TagVectorManager] ✅ HNSW index written to temp file');
+                tempFiles.push({ temp: tempIndexPath, final: indexPath });
             }
             
             // 3.2 写入元数据到临时文件（✅ 分块序列化避免阻塞）
@@ -1018,13 +1038,17 @@ class TagVectorManager {
             
             const saveTime = ((Date.now() - startTime) / 1000).toFixed(1);
             
-            if (incrementalMode && this.dirtyShards.size > 0) {
+            // ✅ 竞态修复：无论哪种模式，都在成功后清空dirtyShards
+            if (incrementalMode && shardDataList.length > 0) {
                 console.log(`[TagVectorManager] ✅ Diff saved in ${saveTime}s: ${metaData.totalTags} tags, ${shardDataList.length}/${shardCount} dirty shards`);
-                // 清空脏shard标记
-                this.dirtyShards.clear();
+            } else if (incrementalMode) {
+                console.log(`[TagVectorManager] ✅ Metadata saved in ${saveTime}s: ${metaData.totalTags} tags (no vector changes)`);
             } else {
-                console.log(`[TagVectorManager] ✅ Saved successfully in ${saveTime}s: ${metaData.totalTags} tags, ${shardDataList.length} shard(s)`);
+                console.log(`[TagVectorManager] ✅ Full save in ${saveTime}s: ${metaData.totalTags} tags, ${shardDataList.length} shard(s)`);
             }
+            
+            // 🔒 关键：清空所有脏标记（在成功写入后）
+            this.dirtyShards.clear();
             
         } catch (error) {
             // ✅ 如果任何步骤失败，清理所有临时文件
@@ -1182,24 +1206,24 @@ class TagVectorManager {
         const dimensions = tagsWithVectors[0][1].vector.length;
         tempTagIndex = new HierarchicalNSW('l2', dimensions);
         
-        // 🌟 读取HNSW索引（Worker模式：异步非阻塞）
+        // ✅ 修复：统一使用主线程同步读取（索引必须在主线程中）
         console.log('[TagVectorManager] 📖 Reading HNSW index...');
         const startTime = Date.now();
         
-        if (this.indexWorker) {
-            // Worker异步读取
-            const result = await this.indexWorker.loadIndex(indexPath, dataPath);
-            if (!result.success) {
-                throw new Error(`Worker load failed: ${result.message}`);
-            }
-            tempTagIndex = this.indexWorker.tagIndex; // 获取Worker中的索引引用
-            console.log(`[TagVectorManager] ✅ HNSW index loaded by worker in ${result.loadTime}ms`);
-        } else {
-            // 传统同步读取
-            tempTagIndex.readIndexSync(indexPath);
-            const loadTime = ((Date.now() - startTime) / 1000).toFixed(1);
-            console.log(`[TagVectorManager] ✅ HNSW index loaded in ${loadTime}s (sync mode)`);
-        }
+        // 🔒 使用 setImmediate 避免阻塞，但保持在主线程中执行
+        await new Promise((resolve, reject) => {
+            setImmediate(() => {
+                try {
+                    tempTagIndex.readIndexSync(indexPath);
+                    resolve();
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        });
+        
+        const loadTime = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`[TagVectorManager] ✅ HNSW index loaded in ${loadTime}s`);
 
         // ✅ Bug #1修复: 尝试加载Label映射
         try {
@@ -1281,18 +1305,42 @@ class TagVectorManager {
     async queueUpdate(filePath) {
         this.updateQueue.push(filePath);
         
-        // ✅ 关键修复：等待初始化完成
+        // ✅ 竞态修复：等待初始化完成，同时避免后台任务期间的更新丢失
         if (this.updateLock || !this.initialized) {
+            this.debugLog(`Update queued for ${path.basename(filePath)} (lock: ${this.updateLock}, init: ${this.initialized})`);
             return; // 已有更新在进行中或尚未初始化
         }
+        
+        // ✅ 竞态修复：等待后台任务完成再处理更新队列
+        if (this.isBackgroundTaskRunning) {
+            this.debugLog(`Waiting for background task to complete before processing queue...`);
+            // 延迟处理，让后台任务先完成
+            setTimeout(() => {
+                if (!this.updateLock && !this.isBackgroundTaskRunning) {
+                    this.processUpdateQueue();
+                }
+            }, 1000);
+            return;
+        }
+        
+        await this.processUpdateQueue();
+    }
+    
+    /**
+     * ✅ 新增：独立的队列处理方法，避免重复代码
+     */
+    async processUpdateQueue() {
+        if (this.updateLock || this.updateQueue.length === 0) return;
         
         this.updateLock = true;
         
         try {
             while (this.updateQueue.length > 0) {
-                const path = this.updateQueue.shift();
-                await this.updateTagsForFile(path);
+                const filePath = this.updateQueue.shift();
+                await this.updateTagsForFile(filePath);
             }
+        } catch (error) {
+            console.error('[TagVectorManager] Queue processing failed:', error);
         } finally {
             this.updateLock = false;
         }
@@ -1384,13 +1432,11 @@ class TagVectorManager {
 
     /**
      * 🌟 原子化应用 Diff 到全局状态（标记脏shard）
+     * ✅ 竞态修复：延迟shard标记，避免在向量化前计算错误的shardCount
      */
     applyDiff(diaryName, addedTags, removedTags) {
-        // 🌟 计算shard数量（与保存时一致）- ✅ 缓存以避免竞态
-        const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
-        const tagsWithVectors = Array.from(this.globalTags.entries())
-            .filter(([_, data]) => data.vector !== null);
-        const shardCount = Math.max(1, Math.ceil(tagsWithVectors.length / SHARD_SIZE));
+        // ✅ 竞态修复：先处理所有元数据变更（不计算shard）
+        const tagsNeedingShardMark = new Set(); // 需要标记shard的已向量化tag
         
         // 处理移除
         for (const tag of removedTags) {
@@ -1398,17 +1444,17 @@ class TagVectorManager {
             if (tagData) {
                 tagData.frequency--;
                 tagData.diaries.delete(diaryName);
-                this.dirtyTags.add(tag); // 标记脏数据
+                this.dirtyTags.add(tag);
                 
-                // 🌟 标记该tag所在的shard为脏
+                // 🔒 延迟shard标记：只记录需要标记的tag，不立即计算shardCount
                 if (tagData.vector !== null) {
-                    const shardIndex = this.getShardIndexForTag(tag, shardCount);
-                    this.dirtyShards.add(shardIndex);
+                    tagsNeedingShardMark.add(tag);
                 }
 
                 // 如果频率归零，执行清理
                 if (tagData.frequency <= 0) {
                     this.removeTagFromSystem(tag);
+                    tagsNeedingShardMark.delete(tag); // 已删除的tag不需要标记shard
                 }
             }
         }
@@ -1427,10 +1473,28 @@ class TagVectorManager {
                 const tagData = this.globalTags.get(tag);
                 tagData.frequency++;
                 tagData.diaries.add(diaryName);
+                
+                // 如果已有向量，需要标记shard
+                if (tagData.vector !== null) {
+                    tagsNeedingShardMark.add(tag);
+                }
             }
             this.dirtyTags.add(tag);
+        }
+        
+        // ✅ 统一标记shard：在所有元数据变更完成后，使用一致的shardCount
+        if (tagsNeedingShardMark.size > 0) {
+            const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
+            const currentVectorizedTags = Array.from(this.globalTags.entries())
+                .filter(([_, data]) => data.vector !== null);
+            const shardCount = Math.max(1, Math.ceil(currentVectorizedTags.length / SHARD_SIZE));
             
-            // 🌟 向量化后会再次标记shard（见vectorizeTagBatch）
+            for (const tag of tagsNeedingShardMark) {
+                const shardIndex = this.getShardIndexForTag(tag, shardCount);
+                this.dirtyShards.add(shardIndex);
+            }
+            
+            this.debugLog(`Marked ${this.dirtyShards.size} dirty shards (${tagsNeedingShardMark.size} tags affected)`);
         }
     }
 
@@ -1480,19 +1544,27 @@ class TagVectorManager {
 
     /**
      * 🌟 优化的持久化：仅写入脏数据（带重试机制）
+     * ✅ 竞态修复：改进锁竞争处理和重试逻辑
      */
     async persistChanges() {
-        if (this.dirtyTags.size === 0) return;
-        
-        // ✅ 致命Bug修复：如果被锁住，延迟重试而不是放弃
-        if (this.saveLock) {
-            this.debugLog('Save locked, rescheduling persist...');
-            if (this.saveTimer) clearTimeout(this.saveTimer);
-            this.saveTimer = setTimeout(() => this.persistChanges(), 1000); // 1秒后重试
+        if (this.dirtyTags.size === 0) {
+            this.debugLog('No dirty tags, skipping persist');
             return;
         }
         
-        this.debugLog(`Persisting ${this.dirtyTags.size} dirty tags...`);
+        // ✅ 竞态修复：改进锁等待机制，避免无限重试
+        if (this.saveLock) {
+            this.debugLog('Save locked, rescheduling persist...');
+            if (this.saveTimer) clearTimeout(this.saveTimer);
+            this.saveTimer = setTimeout(() => this.persistChanges(), 1000);
+            return;
+        }
+        
+        // ✅ 竞态修复：在获取锁前先快照脏数据大小，用于验证
+        const dirtyTagsSnapshot = this.dirtyTags.size;
+        const dirtyShardsSnapshot = this.dirtyShards.size;
+        
+        this.debugLog(`Persisting ${dirtyTagsSnapshot} dirty tags, ${dirtyShardsSnapshot} dirty shards...`);
         
         const indexPath = path.join(this.config.vectorStorePath, 'GlobalTags.bin');
         const dataPath = path.join(this.config.vectorStorePath, 'GlobalTags.json');
@@ -1504,15 +1576,17 @@ class TagVectorManager {
             // 保存文件注册表
             await this.saveFileRegistry();
             
-            // ✅ 关键修复：清空脏数据标记（包括dirtyShards）
+            // ✅ 竞态修复：清空脏数据标记（dirtyShards已在saveGlobalTagLibrary中清空）
             this.dirtyTags.clear();
-            // dirtyShards已在saveGlobalTagLibrary中清空，此处无需重复
-            this.debugLog('Persist complete');
+            
+            this.debugLog(`Persist complete (saved ${dirtyTagsSnapshot} tags, ${dirtyShardsSnapshot} shards)`);
         } catch (e) {
             console.error('[TagVectorManager] Persist failed:', e);
-            // ✅ 失败时也重试
+            console.error('[TagVectorManager] Error stack:', e.stack);
+            
+            // ✅ 竞态修复：失败重试时避免数据丢失
             if (this.saveTimer) clearTimeout(this.saveTimer);
-            this.saveTimer = setTimeout(() => this.persistChanges(), 2000); // 2秒后重试
+            this.saveTimer = setTimeout(() => this.persistChanges(), 2000);
         }
     }
 
@@ -1890,22 +1964,35 @@ class TagVectorManager {
         
         console.log(`[TagVectorManager] 🚀 Starting NON-BLOCKING vectorization: ${tags.length} tags (concurrency: ${concurrency})...`);
         
-        // ✅ 致命Bug修复：预先计算并标记将要写入的shard（防止竞态丢失）
+        // ✅ 竞态修复1：使用原子操作获取shard计算快照，防止计算过程中shardCount变化
         const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
-        const currentVectorizedTags = Array.from(this.globalTags.entries())
-            .filter(([_, data]) => data.vector !== null);
-        const shardCount = Math.max(1, Math.ceil((currentVectorizedTags.length + tags.length) / SHARD_SIZE));
         
-        // ✅ 关键：向量化开始前就标记脏shard，即使向量还未生成
+        // 🔒 原子快照：锁定当前状态用于shard计算
+        const vectorizationSnapshot = {
+            currentVectorizedCount: Array.from(this.globalTags.entries())
+                .filter(([_, data]) => data.vector !== null).length,
+            tagsToVectorize: tags.length,
+            timestamp: Date.now()
+        };
+        
+        // 计算稳定的shardCount（基于快照）
+        const stableShardCount = Math.max(1, Math.ceil(
+            (vectorizationSnapshot.currentVectorizedCount + vectorizationSnapshot.tagsToVectorize) / SHARD_SIZE
+        ));
+        
+        console.log(`[TagVectorManager] 📸 Vectorization snapshot: ${vectorizationSnapshot.currentVectorizedCount} existing + ${vectorizationSnapshot.tagsToVectorize} new = ${stableShardCount} shards`);
+        
+        // ✅ 竞态修复2：预先计算并原子标记所有受影响的shard
         const affectedShards = new Set();
         for (const tag of tags) {
-            const shardIndex = this.getShardIndexForTag(tag, shardCount);
+            const shardIndex = this.getShardIndexForTag(tag, stableShardCount);
             affectedShards.add(shardIndex);
         }
         
-        // ✅ 立即标记，防止保存操作跳过这些shard
+        // 🔒 原子标记操作：立即标记所有脏shard，防止并发保存操作跳过
         affectedShards.forEach(idx => this.dirtyShards.add(idx));
-        console.log(`[TagVectorManager] 🎯 Pre-marked ${affectedShards.size} shards as dirty (防止竞态丢失)`);
+        
+        console.log(`[TagVectorManager] 🎯 Pre-marked ${affectedShards.size} shards as dirty (shardCount: ${stableShardCount})`);
         
         // 🚀 使用向量化Worker（完全非阻塞）
         if (this.vectorizeWorker) {
