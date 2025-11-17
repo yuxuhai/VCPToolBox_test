@@ -262,15 +262,20 @@ class TagVectorManager {
         if (VexusIndex) {
             try {
                 const dimensions = parseInt(process.env.VECTORDB_DIMENSION) || 3072;
-                // ✅ 修复：传递维度参数给load方法
-                this.vexus = VexusIndex.load(vexusIndexPath, vexusMapPath, dimensions);
+                const vexusCapacity = parseInt(process.env.VEXUS_INDEX_CAPACITY) || 200000;
+                
+                // ✅ 修复：传递capacity参数给load方法
+                this.vexus = VexusIndex.load(vexusIndexPath, vexusMapPath, dimensions, vexusCapacity);
                 this.usingVexus = true;
-                console.log(`[TagVectorManager] 🦀 ✅ Loaded Vexus-Lite index (${dimensions}D)`);
+                
+                // ✅ 验证加载后的容量
+                const stats = this.vexus.stats();
+                console.log(`[TagVectorManager] 🦀 ✅ Loaded Vexus-Lite index (${dimensions}D, ${stats.total_vectors}/${stats.capacity} vectors)`);
+                
             } catch (e) {
-                // Vexus索引不存在，创建新的
+                // Vexus索引不存在或损坏，创建新的
                 try {
                     const dimensions = parseInt(process.env.VECTORDB_DIMENSION) || 3072;
-                    // ✅ 增加容量到200,000，留足余量
                     const vexusCapacity = parseInt(process.env.VEXUS_INDEX_CAPACITY) || 200000;
                     this.vexus = new VexusIndex(dimensions, vexusCapacity);
                     this.usingVexus = true;
