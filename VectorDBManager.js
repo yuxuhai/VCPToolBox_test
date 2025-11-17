@@ -2612,10 +2612,11 @@ async function processSingleDiaryBookInWorker(diaryName, config) {
                 const dummyText = Object.values(chunkMap)[0].text;
                 const dummyEmbedding = await getEmbeddingsInWorker([prepareTextForEmbedding(dummyText)], config);
                 dimensions = dummyEmbedding[0].length;
-                // 🔧 DEBUG: 强制使用3072D进行测试
-                console.log(`[VectorDB][Worker] ⚠️ Loaded existing index - Vector dimensions from API: ${dimensions}D`);
-                console.log(`[VectorDB][Worker] ⚠️ Forcing 3072D for testing (existing index path)`);
-                dimensions = 3072;
+                
+                // ✅ 验证维度
+                if (config.expectedDimensions && dimensions !== config.expectedDimensions) {
+                    throw new Error(`[VectorDB][Worker] Invalid vector dimension. Expected ${config.expectedDimensions}, but got ${dimensions}.`);
+                }
                 
                 index = new HierarchicalNSW('l2', dimensions);
                 index.readIndexSync(indexPath);
@@ -2717,10 +2718,12 @@ async function processSingleDiaryBookInWorker(diaryName, config) {
             // ✅ 初始化索引（如果还没有）
             if (!index) {
                 dimensions = fileVectors[0].length;
-                // 🔧 DEBUG: 强制使用3072D进行测试
-                console.log(`[VectorDB][Worker] ⚠️ Vector dimensions from API: ${dimensions}D`);
-                console.log(`[VectorDB][Worker] ⚠️ Forcing 3072D for testing`);
-                dimensions = 3072;
+                
+                // ✅ 验证维度
+                if (config.expectedDimensions && dimensions !== config.expectedDimensions) {
+                    throw new Error(`[VectorDB][Worker] Invalid vector dimension. Expected ${config.expectedDimensions}, but got ${dimensions}.`);
+                }
+                
                 index = new HierarchicalNSW('l2', dimensions);
                 // ✅ 修复：智能容量预估，支持大规模专业论文集
                 const processedChunkCount = Object.keys(chunkMap).length;
