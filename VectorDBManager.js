@@ -1294,6 +1294,12 @@ class VectorDBManager {
     }
 
     async loadIndexForSearch(diaryName, dimensions) {
+        // ✅ 关键修复：在所有操作前检查日记本是否被忽略
+        if (diaryName.startsWith('已整理') || diaryName === 'VCP论坛') {
+            this.debugLog(`[VectorDB] Attempted to load index for ignored diary "${diaryName}". Skipping.`);
+            return false;
+        }
+        
         if (this.indices.has(diaryName)) {
             // ✅ 直接 set，Map 的 set 操作是原子的
             this.lruCache.set(diaryName, { lastAccessed: Date.now() });
@@ -2223,11 +2229,12 @@ class VectorDBManager {
         const usageStats = this.storage.loadUsageStats();
         const sortedDiaries = Object.entries(usageStats)
             .sort(([,a], [,b]) => b.frequency - a.frequency)
-            .map(([name]) => name);
+            .map(([name]) => name)
+            .filter(name => !name.startsWith('已整理') && name !== 'VCP论坛'); // ✅ 过滤掉被忽略的日记本
         
         const preLoadCount = Math.min(this.config.preWarmCount, sortedDiaries.length);
         if (preLoadCount === 0) {
-            console.log('[VectorDB] No usage stats found, skipping pre-warming.');
+            console.log('[VectorDB] No usage stats found for active diaries, skipping pre-warming.');
             return;
         }
         
