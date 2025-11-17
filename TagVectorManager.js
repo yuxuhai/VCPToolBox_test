@@ -270,7 +270,7 @@ class TagVectorManager {
                 
                 // ✅ 修复：调用stats()获取实际数据
                 const vexusStats = this.vexus.stats();
-                console.log(`[TagVectorManager] 🦀 ✅ Loaded Vexus-Lite index (${dimensions}D, ${vexusStats.total_vectors}/${vexusStats.capacity} vectors)`);
+                console.log(`[TagVectorManager] 🦀 ✅ Loaded Vexus-Lite index (${dimensions}D, ${vexusStats.totalVectors}/${vexusStats.capacity} vectors)`);
                 
             } catch (e) {
                 // Vexus索引不存在，创建新的
@@ -2289,7 +2289,7 @@ class TagVectorManager {
                     try {
                         // ✅ 检查Vexus索引容量
                         const vexusStats = this.vexus.stats();
-                        const currentSize = vexusStats.total_vectors || 0; // ✅ 修复：字段名应为 total_vectors
+                        const currentSize = vexusStats.totalVectors || 0;
                         const capacity = vexusStats.capacity || 0;
                         
                         if (currentSize + tags.length > capacity * 0.9) {
