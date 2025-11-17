@@ -268,12 +268,12 @@ class TagVectorManager {
                 this.vexus = VexusIndex.load(vexusIndexPath, vexusMapPath, dimensions, vexusCapacity);
                 this.usingVexus = true;
                 
-                // ✅ 验证加载后的容量
-                const stats = this.vexus.stats();
-                console.log(`[TagVectorManager] 🦀 ✅ Loaded Vexus-Lite index (${dimensions}D, ${stats.total_vectors}/${stats.capacity} vectors)`);
+                // ✅ 修复：调用stats()获取实际数据
+                const vexusStats = this.vexus.stats();
+                console.log(`[TagVectorManager] 🦀 ✅ Loaded Vexus-Lite index (${dimensions}D, ${vexusStats.total_vectors}/${vexusStats.capacity} vectors)`);
                 
             } catch (e) {
-                // Vexus索引不存在或损坏，创建新的
+                // Vexus索引不存在，创建新的
                 try {
                     const dimensions = parseInt(process.env.VECTORDB_DIMENSION) || 3072;
                     const vexusCapacity = parseInt(process.env.VEXUS_INDEX_CAPACITY) || 200000;
@@ -392,7 +392,15 @@ class TagVectorManager {
                         
                         if (tagsNeedingVectors.length > 0) {
                             await this.vectorizeTagBatch(tagsNeedingVectors);
-                            await this.buildHNSWIndex();
+                            
+                            // ✅ 修复：仅在未使用Vexus时才构建hnswlib索引
+                            if (!this.usingVexus) {
+                                await this.buildHNSWIndex();
+                                console.log('[TagVectorManager] ✅ [Background] hnswlib index built');
+                            } else {
+                                console.log('[TagVectorManager] ⏭️ [Background] Skipping hnswlib index (using Vexus)');
+                            }
+                            
                             await this.saveGlobalTagLibrary(tagIndexPath, tagDataPath);
                             console.log('[TagVectorManager] ✅ [Background] Incremental vectorization completed');
                         }
@@ -451,7 +459,14 @@ class TagVectorManager {
 
             // ✅ 使用优化后的并发向量化
             await this.vectorizeAllTags();
-            await this.buildHNSWIndex();
+            
+            // ✅ 修复：仅在未使用Vexus时才构建hnswlib索引
+            if (!this.usingVexus) {
+                await this.buildHNSWIndex();
+                console.log('[TagVectorManager] ✅ [Background] hnswlib index built');
+            } else {
+                console.log('[TagVectorManager] ⏭️ [Background] Skipping hnswlib index (using Vexus)');
+            }
             
             console.log('[TagVectorManager] ✅ [Background] Library build completed');
 
@@ -1130,13 +1145,11 @@ class TagVectorManager {
         const tempFiles = [];
         
         try {
-            // 3.1 写入HNSW索引到临时文件（✅ 竞态修复：统一使用主线程同步保存）
-            const tempIndexPath = indexPath + '.tmp';
-            if (this.tagIndex) {
+            // 3.1 ✅ 修复：仅在未使用Vexus时才写HNSW索引
+            if (!this.usingVexus && this.tagIndex) {
+                const tempIndexPath = indexPath + '.tmp';
                 console.log('[TagVectorManager] 💾 Writing HNSW index...');
                 
-                // ✅ 修复：Worker无法访问主线程的索引实例，统一使用同步模式
-                // 🔒 使用 setImmediate 避免阻塞，但保持在主线程中执行
                 await new Promise((resolve, reject) => {
                     setImmediate(() => {
                         try {
@@ -1149,6 +1162,8 @@ class TagVectorManager {
                 });
                 console.log('[TagVectorManager] ✅ HNSW index written to temp file');
                 tempFiles.push({ temp: tempIndexPath, final: indexPath });
+            } else if (this.usingVexus) {
+                console.log('[TagVectorManager] ⏭️ Skipping HNSW index save (using Vexus)');
             }
             
             // 3.2 写入元数据到临时文件（✅ 分块序列化避免阻塞）
@@ -1427,27 +1442,30 @@ class TagVectorManager {
             throw new Error('NEED_INCREMENTAL_VECTORIZE');
         }
 
-        const dimensions = tagsWithVectors[0][1].vector.length;
-        tempTagIndex = new HierarchicalNSW('l2', dimensions);
-        
-        // ✅ 修复：统一使用主线程同步读取（索引必须在主线程中）
-        console.log('[TagVectorManager] 📖 Reading HNSW index...');
-        const startTime = Date.now();
-        
-        // 🔒 使用 setImmediate 避免阻塞，但保持在主线程中执行
-        await new Promise((resolve, reject) => {
-            setImmediate(() => {
-                try {
-                    tempTagIndex.readIndexSync(indexPath);
-                    resolve();
-                } catch (error) {
-                    reject(error);
-                }
+        // ✅ 修复：仅在未使用Vexus时才加载hnswlib索引
+        if (!this.usingVexus) {
+            const dimensions = tagsWithVectors[0][1].vector.length;
+            tempTagIndex = new HierarchicalNSW('l2', dimensions);
+            
+            console.log('[TagVectorManager] 📖 Reading HNSW index...');
+            const startTime = Date.now();
+            
+            await new Promise((resolve, reject) => {
+                setImmediate(() => {
+                    try {
+                        tempTagIndex.readIndexSync(indexPath);
+                        resolve();
+                    } catch (error) {
+                        reject(error);
+                    }
+                });
             });
-        });
-        
-        const loadTime = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`[TagVectorManager] ✅ HNSW index loaded in ${loadTime}s`);
+            
+            const loadTime = ((Date.now() - startTime) / 1000).toFixed(1);
+            console.log(`[TagVectorManager] ✅ HNSW index loaded in ${loadTime}s`);
+        } else {
+            console.log('[TagVectorManager] ⏭️ Skipping HNSW index load (using Vexus)');
+        }
 
         // ✅ Bug #1修复: 尝试加载Label映射
         try {
@@ -2008,11 +2026,16 @@ class TagVectorManager {
             
             console.log(`[TagVectorManager] ✅ Vectorization done, dirty shards: ${this.dirtyShards.size}`);
             
-            // 2. 更新索引
-            if (!this.tagIndex) {
-                await this.buildHNSWIndex();
+            // 2. ✅ 修复：仅在未使用Vexus时才更新hnswlib索引
+            if (!this.usingVexus) {
+                if (!this.tagIndex) {
+                    await this.buildHNSWIndex();
+                } else {
+                    await this.addTagsToIndex(tagsToAdd);
+                }
+                console.log('[TagVectorManager] ✅ hnswlib index updated');
             } else {
-                await this.addTagsToIndex(tagsToAdd);
+                console.log('[TagVectorManager] ⏭️ Skipping hnswlib index update (using Vexus)');
             }
             
             // 3. ✅ 关键修复：只在有脏数据时才保存
