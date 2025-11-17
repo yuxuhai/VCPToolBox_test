@@ -75,6 +75,7 @@ pub struct VexusStats {
     pub total_vectors: u32,
     pub dimensions: u32,
     pub capacity: u32,
+    pub memory_usage: u32,
 }
 
 /// 核心索引结构
@@ -297,6 +298,41 @@ impl VexusIndex {
         Ok(results)
     }
 
+    /// 批量获取向量
+    #[napi]
+    pub fn get_vectors(&self, tags: Vec<String>) -> Result<Buffer> {
+        let mapping = self.mapping.read()
+            .map_err(|e| Error::from_reason(format!("Failed to acquire read lock: {}", e)))?;
+        let index = self.index.read()
+            .map_err(|e| Error::from_reason(format!("Failed to acquire read lock: {}", e)))?;
+
+        let dim = self.dimensions as usize;
+        let mut all_vectors: Vec<f32> = Vec::with_capacity(tags.len() * dim);
+        let zero_vector = vec![0.0; dim];
+        let mut vector_buffer = vec![0.0; dim];
+
+        for tag in tags {
+            if let Some(label) = mapping.tag_to_label.get(&tag) {
+                if index.get(*label as u64, &mut vector_buffer).is_ok() {
+                    all_vectors.extend_from_slice(&vector_buffer);
+                } else {
+                    all_vectors.extend_from_slice(&zero_vector);
+                }
+            } else {
+                all_vectors.extend_from_slice(&zero_vector);
+            }
+        }
+
+        let byte_slice = unsafe {
+            std::slice::from_raw_parts(
+                all_vectors.as_ptr() as *const u8,
+                all_vectors.len() * std::mem::size_of::<f32>(),
+            )
+        };
+
+        Ok(byte_slice.into())
+    }
+
     /// 删除tags
     #[napi]
     pub fn remove(&self, tags: Vec<String>) -> Result<()> {
@@ -326,6 +362,7 @@ impl VexusIndex {
             total_vectors: index.size() as u32,
             dimensions: self.dimensions,
             capacity: index.capacity() as u32,
+            memory_usage: index.memory_usage() as u32,
         })
     }
 }

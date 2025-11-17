@@ -1888,15 +1888,18 @@ class VectorDBManager {
             }
 
             // Step 2: 向量融合 - 构建Tag增强的查询向量（使用扩展后的tags）
-            // 收集匹配tags的向量（加权平均）
+            // ✅ 解耦：通过新接口批量获取向量，不再直接访问 globalTags
+            const tagNames = expandedTags.map(t => t.tag);
+            const retrievedVectors = await this.tagVectorManager.getVectorsForTags(tagNames);
+
             const tagVectors = [];
             const tagWeights = [];
-            
-            for (const tagInfo of expandedTags) {
-                const tagData = this.tagVectorManager.globalTags.get(tagInfo.tag);
-                if (tagData && tagData.vector) {
-                    tagVectors.push(tagData.vector);
-                    tagWeights.push(tagInfo.score); // 使用相似度作为权重
+
+            for (let i = 0; i < expandedTags.length; i++) {
+                const vector = retrievedVectors[i];
+                if (vector) {
+                    tagVectors.push(vector);
+                    tagWeights.push(expandedTags[i].score); // 使用原始的score作为权重
                 }
             }
 

@@ -2624,6 +2624,53 @@ class TagVectorManager {
     }
 
     /**
+     * 🦀 批量获取Tag的向量（Vexus/JS兼容）
+     * @param {string[]} tags - Tag名称数组
+     * @returns {Promise<Array<Float32Array|null>>} - 向量数组，顺序与输入一致，未找到则为null
+     */
+    async getVectorsForTags(tags) {
+        if (tags.length === 0) {
+            return [];
+        }
+
+        // 🦀 优先使用Vexus-Lite
+        if (this.usingVexus && this.vexus) {
+            try {
+                const vectorBuffer = await this.vexus.getVectors(tags);
+                const dimensions = parseInt(process.env.VECTORDB_DIMENSION) || 3072;
+                const vectors = [];
+                
+                for (let i = 0; i < vectorBuffer.length; i += dimensions * 4) {
+                    const singleVectorBuffer = vectorBuffer.slice(i, i + dimensions * 4);
+                    const vector = new Float32Array(singleVectorBuffer.buffer, singleVectorBuffer.byteOffset, dimensions);
+                    
+                    // 检查是否为零向量 (Rust侧返回零向量表示未找到)
+                    let isZeroVector = true;
+                    for (let j = 0; j < vector.length; j++) {
+                        if (vector[j] !== 0) {
+                            isZeroVector = false;
+                            break;
+                        }
+                    }
+                    
+                    vectors.push(isZeroVector ? null : vector);
+                }
+                
+                return vectors;
+            } catch (error) {
+                console.error('[TagVectorManager] Vexus getVectors failed:', error.message);
+                // Fallback to JS method if Vexus fails
+            }
+        }
+
+        // Fallback: JS in-memory method
+        return tags.map(tag => {
+            const tagData = this.globalTags.get(tag);
+            return (tagData && tagData.vector) ? tagData.vector : null;
+        });
+    }
+
+    /**
      * 获取统计
      */
     getStats() {
