@@ -970,8 +970,8 @@ class TagVectorManager {
         const tagsWithVectors = Array.from(this.globalTags.entries())
             .filter(([_, data]) => data.vector !== null);
         
-        if (tagsWithVectors.length === 0 && this.globalTags.size > 0) {
-            console.error('[TagVectorManager] ❌ FATAL: Attempting to save with 0 vectors but non-zero tags!');
+        if (!this.usingVexus && tagsWithVectors.length === 0 && this.globalTags.size > 0) {
+            console.error('[TagVectorManager] ❌ FATAL: Attempting to save with 0 vectors but non-zero tags! (JS mode)');
             console.error('[TagVectorManager] Total tags:', this.globalTags.size);
             console.error('[TagVectorManager] This indicates data corruption, aborting save to prevent data loss');
             throw new Error('Data corruption detected: no vectors to save');
