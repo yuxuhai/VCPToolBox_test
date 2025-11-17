@@ -5,7 +5,7 @@ use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};  // ✅ 修复：使用标准库的RwLock
+use std::sync::{Arc, RwLock};
 use usearch::Index;
 
 /// Mapping结构：Tag文本 <-> Label数字
@@ -66,7 +66,7 @@ impl Mapping {
 #[napi(object)]
 pub struct SearchResult {
     pub tag: String,
-    pub score: f64,  // 改为f64，napi支持
+    pub score: f64,
 }
 
 /// 统计信息
@@ -112,9 +112,9 @@ impl VexusIndex {
         })
     }
 
-    /// 从磁盘加载索引（静态方法）
+    /// ✅ 修复：从磁盘加载索引（增加capacity参数）
     #[napi(factory)]
-    pub fn load(index_path: String, map_path: String, dim: u32) -> Result<Self> {
+    pub fn load(index_path: String, map_path: String, dim: u32, capacity: u32) -> Result<Self> {
         // 读取映射文件
         let map_data = std::fs::read(&map_path)
             .map_err(|e| Error::from_reason(format!("Failed to read mapping: {}", e)))?;
@@ -128,9 +128,9 @@ impl VexusIndex {
             mapping.next_label = AtomicU32::new(max_label + 1);
         }
 
-        // 创建临时索引并加载（使用传入的维度）
+        // 创建临时索引并加载
         let temp_index = Index::new(&usearch::IndexOptions {
-            dimensions: dim as usize,  // ✅ 修复：使用传入的维度参数
+            dimensions: dim as usize,
             metric: usearch::MetricKind::L2sq,
             quantization: usearch::ScalarKind::F32,
             connectivity: 16,
@@ -144,6 +144,15 @@ impl VexusIndex {
         temp_index.load(&index_path)
             .map_err(|e| Error::from_reason(format!("Failed to load index: {:?}", e)))?;
 
+        // ✅ 关键修复：加载后立即扩容到目标容量
+        let current_capacity = temp_index.capacity();
+        if capacity as usize > current_capacity {
+            eprintln!("[Vexus] Expanding capacity: {} -> {}", current_capacity, capacity);
+            temp_index
+                .reserve(capacity as usize)
+                .map_err(|e| Error::from_reason(format!("Failed to expand capacity after load: {:?}", e)))?;
+        }
+
         let dimensions = temp_index.dimensions() as u32;
 
         Ok(Self {
@@ -156,7 +165,6 @@ impl VexusIndex {
     /// 保存到磁盘
     #[napi]
     pub fn save(&self, index_path: String, map_path: String) -> Result<()> {
-        // ✅ 修复：使用标准库RwLock
         let mapping = self.mapping.read()
             .map_err(|e| Error::from_reason(format!("Failed to acquire read lock: {}", e)))?;
         let map_data = bincode::serialize(&*mapping)
@@ -185,10 +193,9 @@ impl VexusIndex {
         Ok(())
     }
 
-    /// 批量添加/更新向量
+    /// ✅ 修复：批量添加/更新向量（增加容量检查和自动扩容）
     #[napi]
     pub fn upsert(&self, tags: Vec<String>, vectors: Buffer) -> Result<()> {
-        // ✅ 修复：使用标准库RwLock
         let mut mapping = self.mapping.write()
             .map_err(|e| Error::from_reason(format!("Failed to acquire write lock: {}", e)))?;
         let index = self.index.write()
@@ -213,14 +220,42 @@ impl VexusIndex {
             )));
         }
 
+        // ✅ 关键修复：容量检查和自动扩容
+        let current_size = index.size();
+        let current_capacity = index.capacity();
+        let required_capacity = current_size + num_vectors;
+
+        if required_capacity > current_capacity {
+            // 扩容到需求的1.5倍（留余量）
+            let new_capacity = (required_capacity as f64 * 1.5) as usize;
+            eprintln!(
+                "[Vexus] Auto-expanding: {}/{} -> capacity {}",
+                current_size, current_capacity, new_capacity
+            );
+            
+            index
+                .reserve(new_capacity)
+                .map_err(|e| Error::from_reason(format!(
+                    "Failed to expand capacity from {} to {}: {:?}",
+                    current_capacity, new_capacity, e
+                )))?;
+        }
+
+        // 批量upsert
         for (i, tag) in tags.iter().enumerate() {
             let label = mapping.get_or_create_label(tag);
             let vector_start = i * vec_dim;
             let vector = &vec_data[vector_start..vector_start + vec_dim];
 
+            // remove + add = upsert（忽略remove错误）
+            let _ = index.remove(label as u64);
+            
             index
                 .add(label as u64, vector)
-                .map_err(|e| Error::from_reason(format!("Failed to add vector: {:?}", e)))?;
+                .map_err(|e| Error::from_reason(format!(
+                    "Failed to add vector for tag '{}' (label {}): {:?}",
+                    tag, label, e
+                )))?;
         }
 
         Ok(())
@@ -229,7 +264,6 @@ impl VexusIndex {
     /// 快速搜索
     #[napi]
     pub fn search(&self, query: Buffer, k: u32) -> Result<Vec<SearchResult>> {
-        // ✅ 修复：使用标准库RwLock
         let mapping = self.mapping.read()
             .map_err(|e| Error::from_reason(format!("Failed to acquire read lock: {}", e)))?;
         let index = self.index.read()
@@ -255,7 +289,7 @@ impl VexusIndex {
             if let Some(tag) = mapping.get_tag(label) {
                 results.push(SearchResult {
                     tag: tag.clone(),
-                    score: (1.0 - distance as f64), // 转换为相似度分数
+                    score: (1.0 - distance as f64),
                 });
             }
         }
@@ -266,7 +300,6 @@ impl VexusIndex {
     /// 删除tags
     #[napi]
     pub fn remove(&self, tags: Vec<String>) -> Result<()> {
-        // ✅ 修复：使用标准库RwLock
         let mut mapping = self.mapping.write()
             .map_err(|e| Error::from_reason(format!("Failed to acquire write lock: {}", e)))?;
         let index = self.index.write()
@@ -286,7 +319,6 @@ impl VexusIndex {
     /// 获取统计信息
     #[napi]
     pub fn stats(&self) -> Result<VexusStats> {
-        // ✅ 修复：使用标准库RwLock
         let index = self.index.read()
             .map_err(|e| Error::from_reason(format!("Failed to acquire read lock: {}", e)))?;
 
