@@ -187,7 +187,37 @@ class PluginManager {
             executionError = error;
         }
 
-        if (plugin.capabilities && plugin.capabilities.systemPromptPlaceholders) {
+        // This function now handles all placeholders, regardless of what's in the manifest.
+        // The manifest entry is now purely for documentation.
+
+        let parsedData = null;
+        let isJsonDict = false;
+
+        // Attempt to parse the output as a JSON dictionary
+        if (newValue && newValue.trim().startsWith('{') && newValue.trim().endsWith('}')) {
+            try {
+                parsedData = JSON.parse(newValue.trim());
+                isJsonDict = typeof parsedData === 'object' && !Array.isArray(parsedData) && parsedData !== null;
+            } catch (e) {
+                if (this.debugMode) console.warn(`[PluginManager] Static plugin ${plugin.name} output looked like JSON but failed to parse. Treating as plain text. Error: ${e.message}`);
+                isJsonDict = false;
+            }
+        }
+
+        if (isJsonDict) {
+            // Handle JSON dictionary output: dynamically create/update placeholders from JSON keys
+            if (this.debugMode) console.log(`[PluginManager] Plugin ${plugin.name} returned a JSON dictionary. Dynamically updating placeholders.`);
+            
+            for (const key in parsedData) {
+                if (Object.prototype.hasOwnProperty.call(parsedData, key)) {
+                    const placeholderKey = `{{${key}}}`; // Construct the placeholder, e.g., {{小芸日记本}}
+                    const specificValue = String(parsedData[key] || ''); // Ensure value is a string
+                    this.staticPlaceholderValues.set(placeholderKey, { value: specificValue, serverId: 'local' });
+                    if (this.debugMode) console.log(`[PluginManager] Dynamically updated placeholder ${placeholderKey} from plugin ${plugin.name}.`);
+                }
+            }
+        } else if (plugin.capabilities && plugin.capabilities.systemPromptPlaceholders) {
+            // Fallback to original logic for plain text output, using the manifest for the placeholder key
             plugin.capabilities.systemPromptPlaceholders.forEach(ph => {
                 const placeholderKey = ph.placeholder;
                 const currentValueEntry = this.staticPlaceholderValues.get(placeholderKey);
@@ -195,7 +225,7 @@ class PluginManager {
 
                 if (newValue !== null && newValue.trim() !== "") {
                     this.staticPlaceholderValues.set(placeholderKey, { value: newValue.trim(), serverId: 'local' });
-                    if (this.debugMode) console.log(`[PluginManager] Placeholder ${placeholderKey} for ${plugin.name} updated with value: "${(newValue.trim()).substring(0,70)}..."`);
+                    if (this.debugMode) console.log(`[PluginManager] Placeholder ${placeholderKey} for ${plugin.name} updated with plain text value: "${(newValue.trim()).substring(0,70)}..."`);
                 } else if (executionError) {
                     const errorMessage = `[Error updating ${plugin.name}: ${executionError.message.substring(0,100)}...]`;
                     if (!currentValue || (currentValue && currentValue.startsWith("[Error"))) {
@@ -208,7 +238,7 @@ class PluginManager {
                     if (this.debugMode) console.warn(`[PluginManager] Static plugin ${plugin.name} produced no new output for ${placeholderKey}. Keeping stale value (if any).`);
                     if (!currentValueEntry) {
                         this.staticPlaceholderValues.set(placeholderKey, { value: `[${plugin.name} data currently unavailable]`, serverId: 'local' });
-                        if (this.debugMode) console.log(`[PluginManager] Placeholder ${placeholderKey} for ${plugin.name} set to 'unavailable'.`);
+                        if (this.debugMode) console.log(`[PluginManager] Placeholder ${plugin.name} set to 'unavailable'.`);
                     }
                 }
             });
