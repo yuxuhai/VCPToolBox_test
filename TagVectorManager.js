@@ -270,9 +270,11 @@ class TagVectorManager {
                 // Vexus索引不存在，创建新的
                 try {
                     const dimensions = parseInt(process.env.VECTORDB_DIMENSION) || 3072;
-                    this.vexus = new VexusIndex(dimensions, 100000);
+                    // ✅ 增加容量到200,000，留足余量
+                    const vexusCapacity = parseInt(process.env.VEXUS_INDEX_CAPACITY) || 200000;
+                    this.vexus = new VexusIndex(dimensions, vexusCapacity);
                     this.usingVexus = true;
-                    console.log(`[TagVectorManager] 🦀 ✅ Created new Vexus-Lite index (${dimensions}D, capacity: 100000)`);
+                    console.log(`[TagVectorManager] 🦀 ✅ Created new Vexus-Lite index (${dimensions}D, capacity: ${vexusCapacity})`);
                 } catch (createError) {
                     console.warn('[TagVectorManager] Failed to create Vexus index:', createError.message);
                     this.usingVexus = false;
@@ -2256,6 +2258,16 @@ class TagVectorManager {
                 // 🦀 如果使用Vexus，批量添加到索引
                 if (this.usingVexus && vectors.length > 0) {
                     try {
+                        // ✅ 检查Vexus索引容量
+                        const vexusStats = this.vexus.stats();
+                        const currentSize = vexusStats.size || 0;
+                        const capacity = vexusStats.capacity || 0;
+                        
+                        if (currentSize + tags.length > capacity * 0.9) {
+                            console.warn(`[TagVectorManager] ⚠️ Vexus index near capacity: ${currentSize}/${capacity}`);
+                            console.warn(`[TagVectorManager] Please increase VEXUS_INDEX_CAPACITY in .env`);
+                        }
+                        
                         // 准备Float32Array数据
                         const dimensions = vectors[0].length;
                         const flatVectors = new Float32Array(tags.length * dimensions);
@@ -2267,9 +2279,17 @@ class TagVectorManager {
                         const vectorBuffer = Buffer.from(flatVectors.buffer);
                         this.vexus.upsert(tags, vectorBuffer);
                         
-                        console.log(`[TagVectorManager] 🦀 Added ${tags.length} vectors to Vexus index`);
+                        console.log(`[TagVectorManager] 🦀 Added ${tags.length} vectors to Vexus index (${currentSize + tags.length}/${capacity})`);
                     } catch (vexusError) {
-                        console.error('[TagVectorManager] Vexus upsert failed:', vexusError.message);
+                        console.error('[TagVectorManager] ❌ Vexus upsert failed:', vexusError.message);
+                        
+                        // ✅ 如果是容量不足错误，禁用Vexus并回退到hnswlib
+                        if (vexusError.message && vexusError.message.includes('capacity')) {
+                            console.error('[TagVectorManager] ⚠️ Vexus index capacity exceeded! Disabling Vexus engine.');
+                            console.error('[TagVectorManager] System will use hnswlib-node for new vectors.');
+                            console.error('[TagVectorManager] Please restart server with increased VEXUS_INDEX_CAPACITY.');
+                            this.usingVexus = false;
+                        }
                     }
                 }
                 
@@ -2317,7 +2337,13 @@ class TagVectorManager {
                         const vectorBuffer = Buffer.from(flatVectors.buffer);
                         this.vexus.upsert(batch, vectorBuffer);
                     } catch (vexusError) {
-                        console.error(`[TagVectorManager] Vexus upsert failed for batch ${i}:`, vexusError.message);
+                        console.error(`[TagVectorManager] ❌ Vexus upsert failed for batch ${i}:`, vexusError.message);
+                        
+                        // ✅ 容量不足时禁用Vexus
+                        if (vexusError.message && vexusError.message.includes('capacity')) {
+                            console.error('[TagVectorManager] ⚠️ Vexus capacity exceeded, disabling for remaining batches');
+                            this.usingVexus = false;
+                        }
                     }
                 }
                 
