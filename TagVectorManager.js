@@ -1032,113 +1032,119 @@ class TagVectorManager {
             labelToTag: Array.from(this.labelToTag.entries())
         };
         
-        // 2. 🌟 准备向量数据（Diff模式：只处理脏shard）
-        // ✅ 竞态修复：确保shardCount计算与标记时一致
-        const shardCount = Math.max(1, Math.ceil(tagsWithVectors.length / SHARD_SIZE));
         const shardDataList = [];
         
-        console.log(`[TagVectorManager] 📊 Save operation using shardCount: ${shardCount} (${currentTagsWithVectors.length} vectorized tags)`);
-        
-        if (incrementalMode && this.dirtyShards.size > 0) {
-            // 🌟 Diff模式：只重写脏shard
-            console.log(`[TagVectorManager] 🎯 Diff mode: Processing ${this.dirtyShards.size} dirty shards out of ${shardCount}`);
+        // ✅ Vexus 优化：仅在非 Vexus 模式下处理向量分片
+        if (!this.usingVexus) {
+            // 2. 🌟 准备向量数据（Diff模式：只处理脏shard）
+            // ✅ 竞态修复：确保shardCount计算与标记时一致
+            const shardCount = Math.max(1, Math.ceil(tagsWithVectors.length / SHARD_SIZE));
             
-            // ✅ 竞态修复：创建脏shard集合的副本 + 验证shard索引有效性
-            const dirtyShardsCopy = new Set(this.dirtyShards);
+            console.log(`[TagVectorManager] 📊 Save operation using shardCount: ${shardCount} (${currentTagsWithVectors.length} vectorized tags)`);
             
-            // 🔒 验证shard索引：过滤掉超出当前shardCount的无效索引（可能由旧的shardCount计算产生）
-            const validDirtyShards = new Set();
-            for (const shardIndex of dirtyShardsCopy) {
-                if (shardIndex >= 0 && shardIndex < shardCount) {
-                    validDirtyShards.add(shardIndex);
-                } else {
-                    console.warn(`[TagVectorManager] ⚠️ Ignoring invalid shard index ${shardIndex} (current shardCount: ${shardCount})`);
-                }
-            }
-            
-            if (validDirtyShards.size < dirtyShardsCopy.size) {
-                console.log(`[TagVectorManager] 🔧 Filtered ${dirtyShardsCopy.size - validDirtyShards.size} invalid shard indices`);
-            }
-            
-            // 按tag分组到对应的shard
-            const shardMap = new Map(); // shardIndex → {tag: vector}
-            
-            for (const [tag, data] of currentTagsWithVectors) {
-                const shardIndex = this.getShardIndexForTag(tag, shardCount);
+            if (incrementalMode && this.dirtyShards.size > 0) {
+                // 🌟 Diff模式：只重写脏shard
+                console.log(`[TagVectorManager] 🎯 Diff mode: Processing ${this.dirtyShards.size} dirty shards out of ${shardCount}`);
                 
-                // 只处理脏shard
-                if (dirtyShardsCopy.has(shardIndex)) {
+                // ✅ 竞态修复：创建脏shard集合的副本 + 验证shard索引有效性
+                const dirtyShardsCopy = new Set(this.dirtyShards);
+                
+                // 🔒 验证shard索引：过滤掉超出当前shardCount的无效索引（可能由旧的shardCount计算产生）
+                const validDirtyShards = new Set();
+                for (const shardIndex of dirtyShardsCopy) {
+                    if (shardIndex >= 0 && shardIndex < shardCount) {
+                        validDirtyShards.add(shardIndex);
+                    } else {
+                        console.warn(`[TagVectorManager] ⚠️ Ignoring invalid shard index ${shardIndex} (current shardCount: ${shardCount})`);
+                    }
+                }
+                
+                if (validDirtyShards.size < dirtyShardsCopy.size) {
+                    console.log(`[TagVectorManager] 🔧 Filtered ${dirtyShardsCopy.size - validDirtyShards.size} invalid shard indices`);
+                }
+                
+                // 按tag分组到对应的shard
+                const shardMap = new Map(); // shardIndex → {tag: vector}
+                
+                for (const [tag, data] of currentTagsWithVectors) {
+                    const shardIndex = this.getShardIndexForTag(tag, shardCount);
+                    
+                    // 只处理脏shard
+                    if (dirtyShardsCopy.has(shardIndex)) {
+                        if (!shardMap.has(shardIndex)) {
+                            shardMap.set(shardIndex, {});
+                        }
+                        shardMap.get(shardIndex)[tag] = Array.from(data.vector);
+                    }
+                }
+                
+                // 对于每个脏shard，加载旧数据并合并
+                for (const shardIndex of validDirtyShards) {
+                    const shardPath = `${vectorBasePath}_${shardIndex + 1}.json`;
+                    let shardData = shardMap.get(shardIndex) || {};
+                    
+                    try {
+                        // 尝试加载旧shard数据
+                        const oldContent = await fs.readFile(shardPath, 'utf-8');
+                        const oldShardFile = JSON.parse(oldContent);
+                        const oldShardData = oldShardFile.vectors || oldShardFile;
+                        
+                        // 合并：保留旧tag + 更新新tag
+                        for (const [tag, vector] of Object.entries(oldShardData)) {
+                            if (!shardData[tag] && this.globalTags.has(tag)) {
+                                // 旧tag仍然存在且未在本次更新中
+                                const tagData = this.globalTags.get(tag);
+                                if (tagData && tagData.vector) {
+                                    shardData[tag] = Array.from(tagData.vector);
+                                }
+                            }
+                        }
+                        
+                        this.debugLog(`Shard ${shardIndex + 1}: merged ${Object.keys(oldShardData).length} old + ${Object.keys(shardMap.get(shardIndex) || {}).length} new tags`);
+                    } catch (e) {
+                        // 旧shard不存在或损坏，使用新数据
+                        this.debugLog(`Shard ${shardIndex + 1}: creating new (${Object.keys(shardData).length} tags)`);
+                    }
+                    
+                    shardDataList.push({
+                        index: shardIndex + 1,
+                        data: shardData,
+                        checksum: this.computeChecksum(shardData)
+                    });
+                }
+                
+                console.log(`[TagVectorManager] ✅ Prepared ${shardDataList.length} dirty shards for writing`);
+                
+            } else if (incrementalMode) {
+                // 增量模式但没有脏shard，跳过向量文件写入
+                console.log(`[TagVectorManager] ⏭️ No dirty shards, skipping vector file write`);
+                
+            } else {
+                // 完整模式：全量重写所有shard
+                console.log(`[TagVectorManager] 📦 Full mode: Writing all ${shardCount} shards`);
+                
+                // 按tag分组到对应的shard
+                const shardMap = new Map();
+                for (const [tag, data] of currentTagsWithVectors) {
+                    const shardIndex = this.getShardIndexForTag(tag, shardCount);
                     if (!shardMap.has(shardIndex)) {
                         shardMap.set(shardIndex, {});
                     }
                     shardMap.get(shardIndex)[tag] = Array.from(data.vector);
                 }
-            }
-            
-            // 对于每个脏shard，加载旧数据并合并
-            for (const shardIndex of validDirtyShards) {
-                const shardPath = `${vectorBasePath}_${shardIndex + 1}.json`;
-                let shardData = shardMap.get(shardIndex) || {};
                 
-                try {
-                    // 尝试加载旧shard数据
-                    const oldContent = await fs.readFile(shardPath, 'utf-8');
-                    const oldShardFile = JSON.parse(oldContent);
-                    const oldShardData = oldShardFile.vectors || oldShardFile;
-                    
-                    // 合并：保留旧tag + 更新新tag
-                    for (const [tag, vector] of Object.entries(oldShardData)) {
-                        if (!shardData[tag] && this.globalTags.has(tag)) {
-                            // 旧tag仍然存在且未在本次更新中
-                            const tagData = this.globalTags.get(tag);
-                            if (tagData && tagData.vector) {
-                                shardData[tag] = Array.from(tagData.vector);
-                            }
-                        }
-                    }
-                    
-                    this.debugLog(`Shard ${shardIndex + 1}: merged ${Object.keys(oldShardData).length} old + ${Object.keys(shardMap.get(shardIndex) || {}).length} new tags`);
-                } catch (e) {
-                    // 旧shard不存在或损坏，使用新数据
-                    this.debugLog(`Shard ${shardIndex + 1}: creating new (${Object.keys(shardData).length} tags)`);
+                // 生成所有shard
+                for (let i = 0; i < shardCount; i++) {
+                    const shardData = shardMap.get(i) || {};
+                    shardDataList.push({
+                        index: i + 1,
+                        data: shardData,
+                        checksum: this.computeChecksum(shardData)
+                    });
                 }
-                
-                shardDataList.push({
-                    index: shardIndex + 1,
-                    data: shardData,
-                    checksum: this.computeChecksum(shardData)
-                });
             }
-            
-            console.log(`[TagVectorManager] ✅ Prepared ${shardDataList.length} dirty shards for writing`);
-            
-        } else if (incrementalMode) {
-            // 增量模式但没有脏shard，跳过向量文件写入
-            console.log(`[TagVectorManager] ⏭️ No dirty shards, skipping vector file write`);
-            
         } else {
-            // 完整模式：全量重写所有shard
-            console.log(`[TagVectorManager] 📦 Full mode: Writing all ${shardCount} shards`);
-            
-            // 按tag分组到对应的shard
-            const shardMap = new Map();
-            for (const [tag, data] of currentTagsWithVectors) {
-                const shardIndex = this.getShardIndexForTag(tag, shardCount);
-                if (!shardMap.has(shardIndex)) {
-                    shardMap.set(shardIndex, {});
-                }
-                shardMap.get(shardIndex)[tag] = Array.from(data.vector);
-            }
-            
-            // 生成所有shard
-            for (let i = 0; i < shardCount; i++) {
-                const shardData = shardMap.get(i) || {};
-                shardDataList.push({
-                    index: i + 1,
-                    data: shardData,
-                    checksum: this.computeChecksum(shardData)
-                });
-            }
+            console.log('[TagVectorManager] ⏭️ Skipping vector shard save (using Vexus)');
         }
         
         // 3. ✅ Bug #2-3修复: 原子性写入 - 先写临时文件，全部成功后再重命名
@@ -1294,29 +1300,59 @@ class TagVectorManager {
     async loadGlobalTagLibrary(indexPath, dataPath) {
         const metaPath = dataPath.replace('.json', '_meta.json');
         const vectorBasePath = dataPath.replace('.json', '_vectors');
-        const labelMapPath = dataPath.replace('.json', '_label_map.json'); // ✅ Bug #1修复
-        
+        const labelMapPath = dataPath.replace('.json', '_label_map.json');
+    
+        // ✅ 新增：检测 Vexus 模式
+        const vexusMode = this.usingVexus;
+        if (vexusMode) {
+            console.log('[TagVectorManager] 🦀 Loading in Vexus-only mode (skipping JSON vectors)');
+        }
+    
         // ✅ Bug #4修复: 先加载到临时变量，成功后再替换
         const tempGlobalTags = new Map();
         let tempTagIndex = null;
         const tempTagToLabel = new Map();
         const tempLabelToTag = new Map();
-        
+    
         // ✅ 尝试加载新格式（分片文件）
         try {
             await fs.access(metaPath);
-            
+    
             // 加载元数据
             const metaContent = await fs.readFile(metaPath, 'utf-8');
             const metaFileData = JSON.parse(metaContent);
-            
+    
             // ✅ Bug #10修复: 版本检查
             if (metaFileData.version && metaFileData.version !== this.config.dataVersion) {
                 console.warn(`[TagVectorManager] Data version mismatch: expected ${this.config.dataVersion}, got ${metaFileData.version}`);
             }
-            
+    
             const metaData = metaFileData.tags || metaFileData;
-            
+    
+            // ✅ 如果是 Vexus 模式，跳过 shard 加载，直接从元数据构建
+            if (vexusMode) {
+                console.log(`[TagVectorManager] 🦀 Vexus mode: Loading ${Object.keys(metaData).length} tags (vectors in Vexus index)`);
+    
+                for (const [tag, meta] of Object.entries(metaData)) {
+                    tempGlobalTags.set(tag, {
+                        vector: null, // ✅ 向量标记为null，后续会触发增量向量化
+                        frequency: meta.frequency,
+                        diaries: new Set(meta.diaries)
+                    });
+                }
+    
+                console.log(`[TagVectorManager] ✅ Loaded ${tempGlobalTags.size} tags (vectors will be restored from Vexus)`);
+    
+                // ✅ 替换内存数据
+                this.globalTags = tempGlobalTags;
+                this.tagIndex = null;
+                this.tagToLabel.clear();
+                this.labelToTag.clear();
+    
+                // ✅ 触发特殊标记：需要增量向量化
+                throw new Error('NEED_INCREMENTAL_VECTORIZE');
+            }
+    
             // 查找所有shard文件
             const dirPath = path.dirname(vectorBasePath);
             const baseFileName = path.basename(vectorBasePath);
@@ -1328,9 +1364,9 @@ class TagVectorManager {
                     const numB = parseInt(b.match(/_(\d+)\.json$/)?.[1] || '0');
                     return numA - numB;
                 });
-            
+    
             console.log(`[TagVectorManager] Found ${shardFiles.length} shard file(s)`);
-            
+    
             // ✅ Bug #8修复: 容错的分片合并
             const allVectorData = {};
             for (const shardFile of shardFiles) {
@@ -1338,7 +1374,7 @@ class TagVectorManager {
                     const shardPath = path.join(dirPath, shardFile);
                     const shardContent = await fs.readFile(shardPath, 'utf-8');
                     const shardFileData = JSON.parse(shardContent);
-                    
+    
                     // ✅ Bug #10修复: 校验和验证
                     const shardData = shardFileData.vectors || shardFileData;
                     if (shardFileData.checksum) {
@@ -1347,7 +1383,7 @@ class TagVectorManager {
                             console.warn(`[TagVectorManager] Checksum mismatch in ${shardFile}`);
                         }
                     }
-                    
+    
                     Object.assign(allVectorData, shardData);
                     console.log(`[TagVectorManager] Loaded shard: ${shardFile} (${Object.keys(shardData).length} vectors)`);
                 } catch (parseError) {
@@ -1355,7 +1391,7 @@ class TagVectorManager {
                     // 继续加载其他分片
                 }
             }
-            
+    
             // ✅ 合并数据到临时Map + 数据一致性检查
             const inconsistentTags = [];
             for (const [tag, meta] of Object.entries(metaData)) {
@@ -1363,16 +1399,16 @@ class TagVectorManager {
                 if (meta.hasVector && !allVectorData[tag]) {
                     inconsistentTags.push(tag);
                 }
-                
+    
                 tempGlobalTags.set(tag, {
                     vector: meta.hasVector && allVectorData[tag] ? new Float32Array(allVectorData[tag]) : null,
                     frequency: meta.frequency,
                     diaries: new Set(meta.diaries)
                 });
             }
-            
+    
             console.log(`[TagVectorManager] Loaded from sharded files: ${Object.keys(metaData).length} tags, ${Object.keys(allVectorData).length} vectors`);
-            
+    
             // ✅ 数据一致性报告
             if (inconsistentTags.length > 0) {
                 console.error(`[TagVectorManager] ⚠️ DATA CORRUPTION DETECTED!`);
@@ -1381,22 +1417,26 @@ class TagVectorManager {
                 console.error(`[TagVectorManager] This likely indicates a crash during save operation`);
                 console.warn(`[TagVectorManager] These tags will be re-vectorized in background...`);
             }
-            
+    
         } catch (e) {
+            if (e.message === 'NEED_INCREMENTAL_VECTORIZE') {
+                throw e; // Propagate to initialize()
+            }
+    
             // ✅ 回退到旧格式
             console.log(`[TagVectorManager] Sharded files not found, trying legacy format...`);
-            
+    
             try {
                 // 尝试单文件格式
                 const vectorPath = dataPath.replace('.json', '_vectors.json');
                 await fs.access(vectorPath);
-                
+    
                 const metaContent = await fs.readFile(metaPath, 'utf-8');
                 const metaData = JSON.parse(metaContent);
-                
+    
                 const vectorContent = await fs.readFile(vectorPath, 'utf-8');
                 const vectorData = JSON.parse(vectorContent);
-                
+    
                 for (const [tag, meta] of Object.entries(metaData)) {
                     tempGlobalTags.set(tag, {
                         vector: meta.hasVector && vectorData[tag] ? new Float32Array(vectorData[tag]) : null,
@@ -1404,13 +1444,13 @@ class TagVectorManager {
                         diaries: new Set(meta.diaries)
                     });
                 }
-                
+    
                 console.log(`[TagVectorManager] Loaded from single vector file: ${Object.keys(metaData).length} tags`);
             } catch (e2) {
                 // 最后尝试完全旧格式
                 const content = await fs.readFile(dataPath, 'utf-8');
                 const tagData = JSON.parse(content);
-
+    
                 for (const [tag, data] of Object.entries(tagData)) {
                     tempGlobalTags.set(tag, {
                         vector: data.vector ? new Float32Array(data.vector) : null,
@@ -1418,38 +1458,38 @@ class TagVectorManager {
                         diaries: new Set(data.diaries)
                     });
                 }
-                
+    
                 console.log(`[TagVectorManager] Loaded from legacy file: ${Object.keys(tagData).length} tags`);
             }
         }
-
+    
         const tagsWithVectors = Array.from(tempGlobalTags.entries())
             .filter(([_, data]) => data.vector !== null);
-
+    
         // ✅ 关键修复：即使没有向量，也加载元数据，稍后增量向量化
         if (tagsWithVectors.length === 0) {
             console.warn('[TagVectorManager] ⚠️ No vectors found, loading metadata only (will vectorize incrementally)');
-            
+    
             // 替换元数据（保留tag信息，向量为null）
             this.globalTags = tempGlobalTags;
             this.tagIndex = null; // 索引需要重建
             this.tagToLabel.clear();
             this.labelToTag.clear();
-            
+    
             console.log(`[TagVectorManager] ✅ Loaded ${tempGlobalTags.size} tags (no vectors, incremental build needed)`);
-            
+    
             // 抛出特殊错误，让initialize()知道需要增量向量化
             throw new Error('NEED_INCREMENTAL_VECTORIZE');
         }
-
+    
         // ✅ 修复：仅在未使用Vexus时才加载hnswlib索引
         if (!this.usingVexus) {
             const dimensions = tagsWithVectors[0][1].vector.length;
             tempTagIndex = new HierarchicalNSW('l2', dimensions);
-            
+    
             console.log('[TagVectorManager] 📖 Reading HNSW index...');
             const startTime = Date.now();
-            
+    
             await new Promise((resolve, reject) => {
                 setImmediate(() => {
                     try {
@@ -1460,19 +1500,19 @@ class TagVectorManager {
                     }
                 });
             });
-            
+    
             const loadTime = ((Date.now() - startTime) / 1000).toFixed(1);
             console.log(`[TagVectorManager] ✅ HNSW index loaded in ${loadTime}s`);
         } else {
             console.log('[TagVectorManager] ⏭️ Skipping HNSW index load (using Vexus)');
         }
-
+    
         // ✅ Bug #1修复: 尝试加载Label映射
         try {
             await fs.access(labelMapPath);
             const labelMapContent = await fs.readFile(labelMapPath, 'utf-8');
             const labelMapData = JSON.parse(labelMapContent);
-            
+    
             // 恢复映射
             for (const [tag, label] of labelMapData.tagToLabel) {
                 tempTagToLabel.set(tag, label);
@@ -1480,7 +1520,7 @@ class TagVectorManager {
             for (const [label, tag] of labelMapData.labelToTag) {
                 tempLabelToTag.set(label, tag);
             }
-            
+    
             console.log(`[TagVectorManager] ✅ Restored label mappings: ${tempTagToLabel.size} tags`);
         } catch (e) {
             // ✅ 回退：重建映射（假设顺序一致）
@@ -1491,7 +1531,7 @@ class TagVectorManager {
                 tempLabelToTag.set(i, tag);
             }
         }
-        
+    
         // ✅ Bug #4修复: 所有数据加载成功后，才替换内存数据
         this.globalTags = tempGlobalTags;
         this.tagIndex = tempTagIndex;
