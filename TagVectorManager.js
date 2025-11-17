@@ -387,9 +387,9 @@ class TagVectorManager {
                         await this.saveGlobalTagLibrary(tagIndexPath, tagDataPath);
                         console.log('[TagVectorManager] ✅ [Background] Library built successfully');
                     } else if (needsVexusRestore) {
-                        // ✅ Vexus 恢复模式：无需向量化，直接完成
-                        console.log('[TagVectorManager] 🦀 [Background] Vexus mode: Skipping vectorization (vectors already in Rust index)');
-                        console.log('[TagVectorManager] ✅ [Background] Initialization completed (Vexus-only mode)');
+                        // 🦀 Vexus 恢复模式：无需任何操作
+                        console.log('[TagVectorManager] 🦀 [Background] Vexus mode: Vectors already in Rust index, skipping all vectorization');
+                        console.log('[TagVectorManager] ✅ [Background] Initialization completed instantly (Vexus-only mode)');
                     } else if (needsIncrementalVectorize) {
                         // ✅ 增量向量化：元数据已有，只缺向量
                         console.log('[TagVectorManager] 🔧 [Background] Starting incremental vectorization for existing tags...');
@@ -1430,6 +1430,11 @@ class TagVectorManager {
         } catch (e) {
             if (e.message === 'NEED_INCREMENTAL_VECTORIZE') {
                 throw e; // Propagate to initialize()
+            }
+    
+            // 🔥 新增：传播 Vexus 恢复信号
+            if (e.message === 'NEED_VEXUS_RESTORE') {
+                throw e; // ← 这是缺失的关键代码！
             }
     
             // ✅ 回退到旧格式
