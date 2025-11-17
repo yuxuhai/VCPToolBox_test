@@ -51,11 +51,6 @@ async function getAllCharacterDiaries() {
                         );
                         // Combine content with separators, similar to server.js logic
                         characterDiaryContent = fileContents.join('\n\n---\n\n');
-                        // New check: If content after joining is just whitespace, treat it as empty.
-                        if (!characterDiaryContent.trim()) {
-                            characterDiaryContent = `[${characterName}日记本内容为空]`;
-                            debugLog(`Content for ${characterName} is empty or whitespace, setting to empty marker.`);
-                        }
                     } else {
                          characterDiaryContent = `[${characterName}日记本内容为空]`; // Explicitly state if empty
                          debugLog(`No .txt or .md files found for ${characterName}, setting content to empty marker.`);
@@ -64,9 +59,7 @@ async function getAllCharacterDiaries() {
                      console.error(`[DailyNoteGet] Error reading character directory ${characterDirPath}:`, charDirError.message);
                      characterDiaryContent = `[Error reading ${characterName}'s diary directory]`;
                 }
-                // The key of the JSON object is now the placeholder name, e.g., "小芸日记本"
-                const placeholderName = `${characterName}日记本`;
-                allDiaries[placeholderName] = characterDiaryContent;
+                allDiaries[characterName] = characterDiaryContent;
             }
         }
         debugLog(`Finished diary scan. Found diaries for ${Object.keys(allDiaries).length} characters.`);

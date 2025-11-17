@@ -17,8 +17,8 @@
   "capabilities": {
     "systemPromptPlaceholders": [
       {
-        "placeholder": "{{角色名}} 或 {{角色名日记本}}",
-        "description": "动态提供所有角色的日记内容。此插件会输出一个JSON对象，其键是占位符的名称（例如 '小芸日记本' 或 '知识库'），值是对应的日记内容。PluginManager会动态解析这些键值对并填充到相应的占位符中。"
+        "placeholder": "{{AllCharacterDiariesData}}",
+        "description": "一个JSON字符串。解析该字符串后会得到一个对象，该对象的键是角色名 (例如 '小明')，值是对应角色所有日记文件内容的合并字符串 (以 '\\n\\n---\\n\\n' 分隔)。服务器端会使用此数据来支持传统的 `{{角色名日记本}}` 占位符的解析。"
       }
     ]
   },
