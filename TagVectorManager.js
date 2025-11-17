@@ -1252,7 +1252,7 @@ class TagVectorManager {
             }
             
             // 🔒 关键：清空所有脏标记（在成功写入后）
-            this.dirtyShards.clear();
+            // this.dirtyShards.clear(); // ✅ 移至 persistChanges 确保完全成功
             
         } catch (error) {
             // ✅ 如果任何步骤失败，清理所有临时文件
@@ -1821,6 +1821,7 @@ class TagVectorManager {
             
             // ✅ 竞态修复：清空脏数据标记（dirtyShards已在saveGlobalTagLibrary中清空）
             this.dirtyTags.clear();
+            this.dirtyShards.clear(); // ✅ 移至此处，确保完全成功后才清理
             
             this.debugLog(`Persist complete (saved ${dirtyTagsSnapshot} tags, ${dirtyShardsSnapshot} shards)`);
         } catch (e) {
@@ -2260,7 +2261,7 @@ class TagVectorManager {
                     try {
                         // ✅ 检查Vexus索引容量
                         const vexusStats = this.vexus.stats();
-                        const currentSize = vexusStats.size || 0;
+                        const currentSize = vexusStats.total_vectors || 0; // ✅ 修复：字段名应为 total_vectors
                         const capacity = vexusStats.capacity || 0;
                         
                         if (currentSize + tags.length > capacity * 0.9) {
