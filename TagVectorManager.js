@@ -289,16 +289,21 @@ class TagVectorManager {
         
         // ====== 步骤1: 加载Tag库 ======
         let needsIncrementalVectorize = false;
+        let needsVexusRestore = false;  // ✅ 新增
         try {
             await this.loadGlobalTagLibrary(tagIndexPath, tagDataPath);
             console.log('[TagVectorManager] ✅ Loaded existing library');
             libraryExists = true;
         } catch (e) {
             if (e.message === 'NEED_INCREMENTAL_VECTORIZE') {
-                // ✅ 特殊情况：元数据存在但向量丢失，需要增量向量化
                 console.log('[TagVectorManager] ⚠️ Metadata loaded but vectors missing, will vectorize incrementally in background...');
-                libraryExists = true; // 元数据已加载
+                libraryExists = true;
                 needsIncrementalVectorize = true;
+            } else if (e.message === 'NEED_VEXUS_RESTORE') {
+                // ✅ 新增：Vexus 恢复模式
+                console.log('[TagVectorManager] 🦀 Metadata loaded, vectors in Vexus index (no re-vectorization needed)');
+                libraryExists = true;
+                needsVexusRestore = true;
             } else {
                 console.log('[TagVectorManager] No existing library found, will build in background...');
                 libraryExists = false;
@@ -381,6 +386,10 @@ class TagVectorManager {
                         await this.buildGlobalTagLibrary();
                         await this.saveGlobalTagLibrary(tagIndexPath, tagDataPath);
                         console.log('[TagVectorManager] ✅ [Background] Library built successfully');
+                    } else if (needsVexusRestore) {
+                        // ✅ Vexus 恢复模式：无需向量化，直接完成
+                        console.log('[TagVectorManager] 🦀 [Background] Vexus mode: Skipping vectorization (vectors already in Rust index)');
+                        console.log('[TagVectorManager] ✅ [Background] Initialization completed (Vexus-only mode)');
                     } else if (needsIncrementalVectorize) {
                         // ✅ 增量向量化：元数据已有，只缺向量
                         console.log('[TagVectorManager] 🔧 [Background] Starting incremental vectorization for existing tags...');
@@ -1349,8 +1358,8 @@ class TagVectorManager {
                 this.tagToLabel.clear();
                 this.labelToTag.clear();
     
-                // ✅ 触发特殊标记：需要增量向量化
-                throw new Error('NEED_INCREMENTAL_VECTORIZE');
+                // ✅ 触发特殊标记：需要从 Vexus 恢复向量
+                throw new Error('NEED_VEXUS_RESTORE');
             }
     
             // 查找所有shard文件
