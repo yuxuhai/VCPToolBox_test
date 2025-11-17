@@ -1748,8 +1748,8 @@ class TagVectorManager {
             this.dirtyTags.add(tag);
         }
         
-        // ✅ 统一标记shard：在所有元数据变更完成后，使用一致的shardCount
-        if (tagsNeedingShardMark.size > 0) {
+        // ✅ 修复：仅在非 Vexus 模式下标记 shard
+        if (tagsNeedingShardMark.size > 0 && !this.usingVexus) {
             const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
             const currentVectorizedTags = Array.from(this.globalTags.entries())
                 .filter(([_, data]) => data.vector !== null);
@@ -1761,6 +1761,9 @@ class TagVectorManager {
             }
             
             this.debugLog(`Marked ${this.dirtyShards.size} dirty shards (${tagsNeedingShardMark.size} tags affected)`);
+        } else if (tagsNeedingShardMark.size > 0) {
+            // Vexus 模式：跳过 shard 标记
+            this.debugLog(`Skipping shard marking (using Vexus): ${tagsNeedingShardMark.size} tags affected`);
         }
     }
 
