@@ -9,8 +9,6 @@ const path = require('path');
 const { HierarchicalNSW } = require('hnswlib-node');
 const chokidar = require('chokidar');
 const crypto = require('crypto');
-const TagIndexWorker = require('./TagIndexWorker');
-const TagVectorizeWorker = require('./TagVectorizeWorker');
 const TagCooccurrenceDB = require('./TagCooccurrenceDB');
 
 // 🦀 尝试加载Vexus-Lite Rust引擎
@@ -65,7 +63,6 @@ class TagVectorManager {
             ignoreSuffix: envIgnoreSuffix,
             debug: process.env.TAG_VECTOR_DEBUG === 'true',
             dataVersion: '2.0.0', // ✅ 添加版本号
-            useWorker: process.env.TAG_USE_WORKER !== 'false', // 🌟 默认启用 Worker
             ...config
         };
 
@@ -121,64 +118,13 @@ class TagVectorManager {
         this.matrixExportTimer = null;
         this.matrixExportDelay = parseInt(process.env.TAG_MATRIX_EXPORT_DELAY) || 30000; // 默认30秒
         
-        // 🌟 Worker Threads 支持
-        this.indexWorker = null;
-        this.vectorizeWorker = null;
-        
-        if (this.config.useWorker) {
-            try {
-                this.indexWorker = new TagIndexWorker();
-                this._setupWorkerHandlers();
-                
-                // 🚀 新增：向量化专用Worker
-                this.vectorizeWorker = new TagVectorizeWorker();
-                this._setupVectorizeWorkerHandlers();
-                
-                console.log('[TagVectorManager] ✅ Worker Threads enabled (Index + Vectorize)');
-            } catch (error) {
-                console.warn('[TagVectorManager] ⚠️ Worker init failed, falling back to sync mode:', error.message);
-                this.indexWorker = null;
-                this.vectorizeWorker = null;
-            }
-        }
 
         console.log('[TagVectorManager] Initialized with batch size:', this.config.tagBatchSize);
-        console.log('[TagVectorManager] Worker mode:', this.config.useWorker ? 'enabled' : 'disabled');
         if (this.config.tagBlacklistSuper.length > 0) {
             console.log('[TagVectorManager] 🌟 Super Blacklist enabled:', this.config.tagBlacklistSuper.join(', '));
         }
     }
     
-    /**
-     * 🌟 设置 Worker 事件处理器（简化版 - 仅用于IO）
-     */
-    _setupWorkerHandlers() {
-        if (!this.indexWorker) return;
-        
-        // Worker 仅用于异步IO，不参与业务逻辑
-        this.indexWorker.on('progress', (progress) => {
-            this.debugLog(`Worker IO progress: ${progress.phase} ${progress.progress}%`);
-        });
-        
-        this.indexWorker.on('error', (error) => {
-            console.error('[TagVectorManager] Worker error:', error);
-        });
-    }
-    
-    /**
-     * 🚀 设置向量化Worker事件处理器
-     */
-    _setupVectorizeWorkerHandlers() {
-        if (!this.vectorizeWorker) return;
-        
-        this.vectorizeWorker.on('progress', (progress) => {
-            console.log(`[TagVectorManager] Vectorization progress: ${progress.percent}% (${progress.completed}/${progress.total})`);
-        });
-        
-        this.vectorizeWorker.on('error', (error) => {
-            console.error('[TagVectorManager] Vectorize worker error:', error);
-        });
-    }
 
     /**
      * 🌟 提取Tag内容（纯函数，用于Diff计算）
@@ -2331,74 +2277,8 @@ class TagVectorManager {
             console.log(`[TagVectorManager] 🎯 Pre-marked ${affectedShards.size} shards as dirty (shardCount: ${stableShardCount})`);
         }
         
-        // 🚀 使用向量化Worker（完全非阻塞）
-        if (this.vectorizeWorker) {
-            try {
-                const vectors = await this.vectorizeWorker.vectorizeWithCallback(
-                    tags,
-                    this.embeddingFunction,
-                    concurrency,
-                    batchSize
-                );
-                
-                // 🦀 如果使用Vexus，批量添加到索引
-                if (this.usingVexus && vectors.length > 0) {
-                    try {
-                        // ✅ 检查Vexus索引容量
-                        const vexusStats = this.vexus.stats();
-                        const currentSize = vexusStats.totalVectors || 0;
-                        const capacity = vexusStats.capacity || 0;
-                        
-                        if (currentSize + tags.length > capacity * 0.9) {
-                            console.warn(`[TagVectorManager] ⚠️ Vexus index near capacity: ${currentSize}/${capacity}`);
-                            console.warn(`[TagVectorManager] Please increase VEXUS_INDEX_CAPACITY in .env`);
-                        }
-                        
-                        // 准备Float32Array数据
-                        const dimensions = vectors[0].length;
-                        const flatVectors = new Float32Array(tags.length * dimensions);
-                        for (let i = 0; i < tags.length; i++) {
-                            flatVectors.set(vectors[i], i * dimensions);
-                        }
-                        
-                        // 批量添加到Vexus索引
-                        const vectorBuffer = Buffer.from(flatVectors.buffer);
-                        this.vexus.upsert(tags, vectorBuffer);
-                        
-                        console.log(`[TagVectorManager] 🦀 Added ${tags.length} vectors to Vexus index (${currentSize + tags.length}/${capacity})`);
-                    } catch (vexusError) {
-                        console.error('[TagVectorManager] ❌ Vexus upsert failed:', vexusError.message);
-                        
-                        // ✅ 如果是容量不足错误，禁用Vexus并回退到hnswlib
-                        if (vexusError.message && vexusError.message.includes('capacity')) {
-                            console.error('[TagVectorManager] ⚠️ Vexus index capacity exceeded! Disabling Vexus engine.');
-                            console.error('[TagVectorManager] System will use hnswlib-node for new vectors.');
-                            console.error('[TagVectorManager] Please restart server with increased VEXUS_INDEX_CAPACITY.');
-                            this.usingVexus = false;
-                        }
-                    }
-                }
-                
-                // 写入内存（无论是否使用Vexus都需要）
-                for (let i = 0; i < tags.length; i++) {
-                    const tag = tags[i];
-                    const tagData = this.globalTags.get(tag);
-                    if (tagData && vectors[i]) {
-                        tagData.vector = vectors[i];
-                        this.dirtyTags.add(tag);
-                    }
-                }
-                
-                console.log(`[TagVectorManager] ✅ NON-BLOCKING vectorization completed: ${vectors.length} vectors`);
-                
-                return;
-            } catch (error) {
-                console.error('[TagVectorManager] Worker vectorization failed, falling back to sync mode:', error.message);
-            }
-        }
-        
-        // 回退：传统同步模式（脏shard已在函数开始时预先标记）
-        console.log(`[TagVectorManager] Using fallback sync vectorization...`);
+        // 传统同步模式（脏shard已在函数开始时预先标记）
+        console.log(`[TagVectorManager] Using sync vectorization...`);
         const batches = [];
         for (let i = 0; i < tags.length; i += batchSize) {
             batches.push(tags.slice(i, i + batchSize));
@@ -2681,7 +2561,6 @@ class TagVectorManager {
             blacklistedTags: this.config.tagBlacklist.length,
             superBlacklistedKeywords: this.config.tagBlacklistSuper.length, // 🌟 超级黑名单关键词数量
             dataVersion: this.config.dataVersion,
-            workerEnabled: !!this.indexWorker,
             usingVexus: this.usingVexus, // 🦀 是否使用Vexus-Lite引擎
             engine: this.usingVexus ? 'Vexus-Lite (Rust)' : 'hnswlib-node (JS)' // 🦀 当前引擎
         };
@@ -2695,10 +2574,6 @@ class TagVectorManager {
             }
         }
         
-        // 🌟 添加 Worker 统计
-        if (this.indexWorker) {
-            baseStats.worker = this.indexWorker.getStats();
-        }
         
         // 🌟 添加Tag共现图谱统计
         if (this.cooccurrenceEnabled && this.cooccurrenceDB) {
@@ -2712,18 +2587,6 @@ class TagVectorManager {
      * 关闭
      */
     async shutdown() {
-        // 🌟 先关闭所有 Workers
-        if (this.vectorizeWorker) {
-            console.log('[TagVectorManager] Shutting down vectorize worker...');
-            await this.vectorizeWorker.shutdown();
-            this.vectorizeWorker = null;
-        }
-        
-        if (this.indexWorker) {
-            console.log('[TagVectorManager] Shutting down index worker...');
-            await this.indexWorker.shutdown();
-            this.indexWorker = null;
-        }
         
         // ✅ 清除索引重建定时器
         if (this.indexRebuildTimer) {
