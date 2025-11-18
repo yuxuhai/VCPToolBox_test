@@ -56,7 +56,8 @@ class KnowledgeBaseManager {
         this.pendingFiles = new Set();
         this.batchTimer = null;
         this.isProcessing = false;
-        this.saveTimers = new Map(); 
+        this.saveTimers = new Map();
+        this.tagCooccurrenceMatrix = null; // 优化1：Tag共现矩阵
     }
 
     async initialize() {
@@ -92,6 +93,9 @@ class KnowledgeBaseManager {
         
         // 2. 预热日记本名称向量缓存（同步阻塞，确保 RAG 插件启动即可用）
         this._hydrateDiaryNameCacheSync();
+        
+        // 优化1：启动时构建共现矩阵
+        this._buildCooccurrenceMatrix();
 
         this._startWatcher();
         this.initialized = true;
@@ -314,41 +318,36 @@ class KnowledgeBaseManager {
     }
 
     async _searchAllIndices(vector, k, tagBoost) {
-        // 1. 准备干净的 Float32Array
+        // 优化2：使用 Promise.all 并行搜索
         let searchVecFloat;
         let tagInfo = null;
 
         if (tagBoost > 0) {
-            // 🌟 TagMemo 逻辑回归：应用 Tag 增强
             const boostResult = this._applyTagBoost(new Float32Array(vector), tagBoost);
             searchVecFloat = boostResult.vector;
             tagInfo = boostResult.info;
         } else {
-            // 🔥 关键：必须拷贝，防止传入 Shared Buffer
             searchVecFloat = new Float32Array(vector);
         }
         
-        // 2. 转换为 Buffer
         const searchBuffer = Buffer.from(searchVecFloat.buffer, searchVecFloat.byteOffset, searchVecFloat.byteLength);
 
-        let allResults = [];
         const allDiaries = this.db.prepare('SELECT DISTINCT diary_name FROM files').all();
         
-        for (const { diary_name } of allDiaries) {
-            const idx = await this._getOrLoadDiaryIndex(diary_name);
-            // Check size if possible
+        const searchPromises = allDiaries.map(async ({ diary_name }) => {
             try {
-                 const stats = idx.stats ? idx.stats() : { totalVectors: 1 };
-                 if (stats.totalVectors === 0) continue;
-            } catch(e) {}
-
-            try {
-                // 使用 Buffer 搜索
-                allResults.push(...idx.search(searchBuffer, k));
+                const idx = await this._getOrLoadDiaryIndex(diary_name);
+                const stats = idx.stats ? idx.stats() : { totalVectors: 1 };
+                if (stats.totalVectors === 0) return [];
+                return idx.search(searchBuffer, k);
             } catch (e) {
-                console.error(`[KnowledgeBase] Vexus search error in global search (${diary_name}):`, e);
+                console.error(`[KnowledgeBase] Vexus search error in parallel global search (${diary_name}):`, e);
+                return [];
             }
-        }
+        });
+
+        const resultsPerIndex = await Promise.all(searchPromises);
+        let allResults = resultsPerIndex.flat();
         
         allResults.sort((a, b) => b.score - a.score);
         
@@ -367,8 +366,8 @@ class KnowledgeBaseManager {
                 sourceFile: path.basename(row.sourceFile),
                 matchedTags: tagInfo ? tagInfo.matchedTags : [],
                 boostFactor: tagInfo ? tagInfo.boostFactor : 0,
-                tagMatchScore: tagInfo ? tagInfo.totalSpikeScore : 0, // ✅ 新增
-                tagMatchCount: tagInfo ? tagInfo.matchedTags.length : 0 // ✅ 新增
+                tagMatchScore: tagInfo ? tagInfo.totalSpikeScore : 0,
+                tagMatchCount: tagInfo ? tagInfo.matchedTags.length : 0
             } : null;
         }).filter(Boolean);
     }
@@ -415,32 +414,40 @@ class KnowledgeBaseManager {
             const tagIds = tagResults.map(r => r.id);
             const placeholders = tagIds.map(() => '?').join(',');
 
-            // [步骤 3] 构建逻辑突触 (SQL 聚合)
-            // 优化：同时处理共现 (co_weight) 和 自身信息 (direct vector)
-            const expandStmt = this.db.prepare(`
-                WITH related_files AS (
-                    SELECT DISTINCT file_id FROM file_tags WHERE tag_id IN (${placeholders})
-                )
-                SELECT
-                    t2.id,
-                    t2.name,
-                    t2.vector,
-                    COUNT(ft.file_id) as co_weight,
-                    (SELECT COUNT(*) FROM file_tags WHERE tag_id = t2.id) as global_freq
-                FROM related_files rf
-                JOIN file_tags ft ON rf.file_id = ft.file_id
-                JOIN tags t2 ON ft.tag_id = t2.id
-                WHERE t2.id NOT IN (${placeholders})
-                GROUP BY t2.id
-                ORDER BY co_weight DESC
-                LIMIT ?
-            `);
-            
+            // [步骤 3] 优化1：从预计算的共现矩阵中查找关联Tag
+            const coTags = new Map(); // Map<tagId, totalWeight>
+            tagResults.forEach(t1 => {
+                const relatedMap = this.tagCooccurrenceMatrix.get(t1.id);
+                if (relatedMap) {
+                    relatedMap.forEach((weight, t2Id) => {
+                        if (!tagIds.includes(t2Id)) { // 排除原始Tag
+                           coTags.set(t2Id, (coTags.get(t2Id) || 0) + weight * t1.score); // 权重叠加
+                        }
+                    });
+                }
+            });
+
+            const sortedCoTags = Array.from(coTags.entries())
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, this.config.tagExpandMaxCount);
+
             let relatedTags = [];
-            try {
-                relatedTags = expandStmt.all(...tagIds, ...tagIds, this.config.tagExpandMaxCount);
-            } catch(e) {
-                console.error('[TagMemo] SQL Error:', e.message);
+            if (sortedCoTags.length > 0) {
+                const relatedTagIds = sortedCoTags.map(t => t[0]);
+                const relatedPlaceholders = relatedTagIds.map(() => '?').join(',');
+                const stmt = this.db.prepare(`
+                    SELECT
+                        id, name, vector,
+                        (SELECT COUNT(*) FROM file_tags WHERE tag_id = tags.id) as global_freq
+                    FROM tags
+                    WHERE id IN (${relatedPlaceholders})
+                `);
+                const tagInfoMap = new Map(stmt.all(...relatedTagIds).map(t => [t.id, t]));
+                
+                relatedTags = sortedCoTags.map(([id, weight]) => {
+                    const info = tagInfoMap.get(id);
+                    return info ? { ...info, co_weight: weight } : null;
+                }).filter(Boolean);
             }
 
             // 🚨 探针 B：如果这里是 0，说明 file_tags 表是空的，或者 Tag 之间没有关联
@@ -838,6 +845,9 @@ class KnowledgeBaseManager {
 
             console.log(`[KnowledgeBase] ✅ Batch complete. Updated ${updates.size} diary indices.`);
 
+            // 优化1：数据更新后，异步重建共现矩阵
+            setImmediate(() => this._buildCooccurrenceMatrix());
+
          } catch (e) {
              console.error('[KnowledgeBase] ❌ Batch processing failed catastrophically.');
              console.error('Error Details:', e);
@@ -909,6 +919,34 @@ class KnowledgeBaseManager {
         return [...new Set(tags)];
     }
     
+    // 优化1：新增方法，用于构建和缓存Tag共现矩阵
+    _buildCooccurrenceMatrix() {
+        console.log('[KnowledgeBase] 🧠 Building tag co-occurrence matrix...');
+        try {
+            const stmt = this.db.prepare(`
+                SELECT ft1.tag_id as tag1, ft2.tag_id as tag2, COUNT(ft1.file_id) as weight
+                FROM file_tags ft1
+                JOIN file_tags ft2 ON ft1.file_id = ft2.file_id AND ft1.tag_id < ft2.tag_id
+                GROUP BY ft1.tag_id, ft2.tag_id
+            `);
+            
+            const matrix = new Map();
+            for (const row of stmt.iterate()) {
+                if (!matrix.has(row.tag1)) matrix.set(row.tag1, new Map());
+                if (!matrix.has(row.tag2)) matrix.set(row.tag2, new Map());
+                
+                matrix.get(row.tag1).set(row.tag2, row.weight);
+                matrix.get(row.tag2).set(row.tag1, row.weight); // 对称填充
+            }
+            this.tagCooccurrenceMatrix = matrix;
+            console.log(`[KnowledgeBase] ✅ Tag co-occurrence matrix built. (${matrix.size} tags)`);
+        } catch (e) {
+            console.error('[KnowledgeBase] ❌ Failed to build tag co-occurrence matrix:', e);
+            // 初始化为空Map，防止后续代码出错
+            this.tagCooccurrenceMatrix = new Map();
+        }
+    }
+
     async shutdown() {
         await this.watcher?.close();
         this.db?.close();
