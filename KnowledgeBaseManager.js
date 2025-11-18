@@ -137,6 +137,7 @@ class KnowledgeBaseManager {
             CREATE INDEX IF NOT EXISTS idx_files_diary ON files(diary_name);
             CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
             CREATE INDEX IF NOT EXISTS idx_file_tags_tag ON file_tags(tag_id);
+            CREATE INDEX IF NOT EXISTS idx_file_tags_composite ON file_tags(tag_id, file_id);
         `);
     }
 
@@ -417,17 +418,19 @@ class KnowledgeBaseManager {
             // [步骤 3] 构建逻辑突触 (SQL 聚合)
             // 优化：同时处理共现 (co_weight) 和 自身信息 (direct vector)
             const expandStmt = this.db.prepare(`
+                WITH related_files AS (
+                    SELECT DISTINCT file_id FROM file_tags WHERE tag_id IN (${placeholders})
+                )
                 SELECT
                     t2.id,
                     t2.name,
                     t2.vector,
-                    COUNT(ft1.file_id) as co_weight,
+                    COUNT(ft.file_id) as co_weight,
                     (SELECT COUNT(*) FROM file_tags WHERE tag_id = t2.id) as global_freq
-                FROM file_tags ft1
-                JOIN file_tags ft2 ON ft1.file_id = ft2.file_id
-                JOIN tags t2 ON ft2.tag_id = t2.id
-                WHERE ft1.tag_id IN (${placeholders})
-                  AND t2.id NOT IN (${placeholders})
+                FROM related_files rf
+                JOIN file_tags ft ON rf.file_id = ft.file_id
+                JOIN tags t2 ON ft.tag_id = t2.id
+                WHERE t2.id NOT IN (${placeholders})
                 GROUP BY t2.id
                 ORDER BY co_weight DESC
                 LIMIT ?
