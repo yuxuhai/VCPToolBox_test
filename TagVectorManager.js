@@ -957,8 +957,9 @@ class TagVectorManager {
         const vectorBasePath = dataPath.replace('.json', '_vectors');
         const labelMapPath = dataPath.replace('.json', '_label_map.json');
         
-        // ✅ 关键优化：减小分片大小，增加并发度，减少单次阻塞时间
+        // ✅ 修复：将变量提升到函数作用域，防止 ReferenceError
         const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
+        let shardCount = 1; // 默认为1，稍后计算
         const currentTagsWithVectors = Array.from(this.globalTags.entries())
             .filter(([_, data]) => data.vector !== null);
         
@@ -993,7 +994,8 @@ class TagVectorManager {
         if (!this.usingVexus) {
             // 2. 🌟 准备向量数据（Diff模式：只处理脏shard）
             // ✅ 竞态修复：确保shardCount计算与标记时一致
-            const shardCount = Math.max(1, Math.ceil(tagsWithVectors.length / SHARD_SIZE));
+            // 🔧 修复：变量已提升到上方，这里直接赋值
+            shardCount = Math.max(1, Math.ceil(tagsWithVectors.length / SHARD_SIZE));
             
             console.log(`[TagVectorManager] 📊 Save operation using shardCount: ${shardCount} (${currentTagsWithVectors.length} vectorized tags)`);
             
@@ -1183,7 +1185,6 @@ class TagVectorManager {
             // 5. ✅ Bug #2修复: 清理多余的旧shard（在成功写入后）
             if (incrementalMode && this.dirtyShards.size > 0) {
                 // ✅ 关键修复：Diff模式不删除旧shard，只在shardCount变化时清理
-                const SHARD_SIZE = parseInt(process.env.TAG_SAVE_SHARD_SIZE) || 2000;
                 const totalVectorizedTags = Array.from(this.globalTags.entries())
                     .filter(([_, data]) => data.vector !== null).length;
                 const expectedShardCount = Math.ceil(totalVectorizedTags / SHARD_SIZE);
