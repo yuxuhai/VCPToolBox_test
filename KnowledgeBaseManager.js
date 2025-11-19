@@ -767,7 +767,8 @@ class KnowledgeBaseManager {
 
             // 4. 写入 DB 和 索引
             const transaction = this.db.transaction(() => {
-                const updates = new Map(); 
+                const updates = new Map();
+                const deletions = new Map(); // 💡 新增：记录待删除的 chunk ID
                 const tagUpdates = [];
 
                 const insertTag = this.db.prepare('INSERT OR IGNORE INTO tags (name, vector) VALUES (?, ?)');
@@ -786,6 +787,7 @@ class KnowledgeBaseManager {
                 const insertFile = this.db.prepare('INSERT INTO files (path, diary_name, checksum, mtime, size, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
                 const updateFile = this.db.prepare('UPDATE files SET checksum = ?, mtime = ?, size = ?, updated_at = ? WHERE id = ?');
                 const getFile = this.db.prepare('SELECT id FROM files WHERE path = ?');
+                const getOldChunkIds = this.db.prepare('SELECT id FROM chunks WHERE file_id = ?'); // 💡 新增
                 const delChunks = this.db.prepare('DELETE FROM chunks WHERE file_id = ?');
                 const delRels = this.db.prepare('DELETE FROM file_tags WHERE file_id = ?');
                 const addChunk = this.db.prepare('INSERT INTO chunks (file_id, chunk_index, content, vector) VALUES (?, ?, ?, ?)');
@@ -805,6 +807,14 @@ class KnowledgeBaseManager {
 
                         if (fRow) {
                             fileId = fRow.id;
+                            
+                            // 💡 核心修复：在删除数据库记录前，先收集旧 chunk ID 用于后续的索引清理
+                            const oldChunkIds = getOldChunkIds.all(fileId).map(c => c.id);
+                            if (oldChunkIds.length > 0) {
+                                if (!deletions.has(dName)) deletions.set(dName, []);
+                                deletions.get(dName).push(...oldChunkIds);
+                            }
+
                             updateFile.run(doc.checksum, doc.mtime, doc.size, now, fileId);
                             delChunks.run(fileId);
                             delRels.run(fileId);
@@ -829,10 +839,20 @@ class KnowledgeBaseManager {
                     });
                 }
 
-                return { updates, tagUpdates };
+                return { updates, tagUpdates, deletions };
             });
 
-            const { updates, tagUpdates } = transaction();
+            const { updates, tagUpdates, deletions } = transaction();
+
+            // 💡 核心修复：在添加新向量之前，先从 Vexus 索引中移除所有旧的向量
+            if (deletions && deletions.size > 0) {
+                for (const [dName, chunkIds] of deletions) {
+                    const idx = await this._getOrLoadDiaryIndex(dName);
+                    if (idx && idx.remove) {
+                        chunkIds.forEach(id => idx.remove(id));
+                    }
+                }
+            }
 
             tagUpdates.forEach(u => this.tagIndex.add(u.id, u.vec));
             this._scheduleIndexSave('global_tags');
