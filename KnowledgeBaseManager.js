@@ -162,17 +162,18 @@ class KnowledgeBaseManager {
         const idxPath = path.join(this.config.storePath, `index_${fileName}.usearch`);
         let idx;
         try {
-            // 检查维度一致性 (简单做法：如果文件存在直接加载，否则新建)
             if (fsSync.existsSync(idxPath)) {
-                // 注意：Vexus load 需要维度匹配，否则会报错
                 idx = VexusIndex.load(idxPath, null, this.config.dimension, capacity);
             } else {
+                // 💡 核心修复：如果索引文件不存在，说明是首次创建。
+                // 此时不应从数据库恢复，因为调用者（_flushBatch）正准备写入初始数据。
+                // 从数据库恢复的逻辑只适用于启动时加载或文件损坏后的重建。
+                console.log(`[KnowledgeBase] Index file not found for ${fileName}, creating a new empty one.`);
                 idx = new VexusIndex(this.config.dimension, capacity);
-                await this._recoverIndexFromDB(idx, tableType, filterDiaryName);
             }
         } catch (e) {
             console.error(`[KnowledgeBase] Index load error (${fileName}): ${e.message}`);
-            console.warn(`[KnowledgeBase] Rebuilding index ${fileName} from DB...`);
+            console.warn(`[KnowledgeBase] Rebuilding index ${fileName} from DB as a fallback...`);
             idx = new VexusIndex(this.config.dimension, capacity);
             await this._recoverIndexFromDB(idx, tableType, filterDiaryName);
         }
