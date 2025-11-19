@@ -856,12 +856,49 @@ class KnowledgeBaseManager {
                 }
             }
 
-            tagUpdates.forEach(u => this.tagIndex.add(u.id, u.vec));
+            // 🛠️ 修复：针对 Tag Index 的安全写入
+            tagUpdates.forEach(u => {
+                try {
+                    this.tagIndex.add(u.id, u.vec);
+                } catch (e) {
+                    if (e.message && e.message.includes('Duplicate')) {
+                        try {
+                            if (this.tagIndex.remove) this.tagIndex.remove(u.id);
+                            this.tagIndex.add(u.id, u.vec);
+                        } catch (retryErr) {
+                            console.error(`[KnowledgeBase] ❌ Failed to upsert tag ${u.id}:`, retryErr.message);
+                        }
+                    }
+                }
+            });
             this._scheduleIndexSave('global_tags');
 
+            // 🛠️ 修复：针对 Diary Index 的安全写入
             for (const [dName, chunks] of updates) {
                 const idx = await this._getOrLoadDiaryIndex(dName);
-                chunks.forEach(u => idx.add(u.id, u.vec));
+                
+                chunks.forEach(u => {
+                    try {
+                        // 尝试直接添加
+                        idx.add(u.id, u.vec);
+                    } catch (e) {
+                        // 捕获 "Duplicate keys" 错误
+                        if (e.message && e.message.includes('Duplicate')) {
+                            // console.warn(`[KnowledgeBase] ⚠️ ID Collision detected for ${u.id} in ${dName}. Performing upsert.`);
+                            try {
+                                // 策略：先移除冲突的 ID，再重新添加 (Upsert)
+                                if (idx.remove) idx.remove(u.id);
+                                idx.add(u.id, u.vec);
+                            } catch (retryErr) {
+                                console.error(`[KnowledgeBase] ❌ Failed to upsert vector ${u.id} in ${dName}:`, retryErr.message);
+                            }
+                        } else {
+                            // 如果是其他错误（如维度不对），则抛出
+                            console.error(`[KnowledgeBase] ❌ Vector add error detected:`, e);
+                        }
+                    }
+                });
+                
                 this._scheduleIndexSave(dName);
             }
 
