@@ -20,7 +20,7 @@ try {
 }
 
 const config = {
-    storePath: path.join(__dirname, 'Plugin', 'RAGDiaryPlugin', 'VectorStore'),
+    storePath: path.join(__dirname, 'VectorStore'),
     dbName: 'knowledge_base.sqlite',
     // ⚠️ 确保这个维度与您的模型和配置一致
     dimension: parseInt(process.env.VECTORDB_DIMENSION) || 3072,
