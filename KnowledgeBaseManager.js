@@ -736,18 +736,19 @@ class KnowledgeBaseManager {
             }
 
             // Tag 处理
-            const newTags = [];
-            const tagCache = new Map(); 
+            const newTagsSet = new Set();
+            const tagCache = new Map();
             const checkTag = this.db.prepare('SELECT id, vector FROM tags WHERE name = ?');
             for (const t of uniqueTags) {
                 const row = checkTag.get(t);
                 if (row && row.vector) tagCache.set(t, { id: row.id, vector: row.vector });
                 else {
                     const cleanedTag = this._prepareTextForEmbedding(t);
-                    if (cleanedTag !== '[EMPTY_CONTENT]') newTags.push(cleanedTag);
+                    if (cleanedTag !== '[EMPTY_CONTENT]') newTagsSet.add(cleanedTag);
                 }
             }
 
+            const newTags = Array.from(newTagsSet);
             // 3. Embedding API Calls
             const embeddingConfig = { apiKey: this.config.apiKey, apiUrl: this.config.apiUrl, model: this.config.model };
             
