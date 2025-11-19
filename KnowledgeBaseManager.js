@@ -548,7 +548,7 @@ class KnowledgeBaseManager {
     // =========================================================================
 
     // 🛠️ 修复 3: 同步回退 + 缓存预热
-    getDiaryNameVector(diaryName) {
+    async getDiaryNameVector(diaryName) {
         if (!diaryName) return null;
         
         // 1. 查内存缓存
@@ -556,7 +556,7 @@ class KnowledgeBaseManager {
             return this.diaryNameVectorCache.get(diaryName);
         }
         
-        // 2. 查数据库 (同步) - 解决 "Lazy Loading" 导致的第一次请求失败
+        // 2. 查数据库 (同步)
         try {
             const row = this.db.prepare("SELECT vector FROM kv_store WHERE key = ?").get(`diary_name:${diaryName}`);
             if (row && row.vector) {
@@ -568,10 +568,9 @@ class KnowledgeBaseManager {
             console.warn(`[KnowledgeBase] DB lookup failed for diary name: ${diaryName}`);
         }
 
-        // 3. 还是没有，触发异步获取 (由于 RAG 插件是同步期待，这里只能返回 null 并触发后台更新)
-        console.warn(`[KnowledgeBase] Cache MISS for diary name vector: "${diaryName}". Triggering async fetch.`);
-        this._fetchAndCacheDiaryNameVector(diaryName);
-        return null;
+        // 3. 缓存未命中，同步等待向量化
+        console.warn(`[KnowledgeBase] Cache MISS for diary name vector: "${diaryName}". Fetching now...`);
+        return await this._fetchAndCacheDiaryNameVector(diaryName);
     }
     
     // 强制同步预热缓存
@@ -599,8 +598,12 @@ class KnowledgeBaseManager {
                 this.diaryNameVectorCache.set(name, vec);
                 const vecBuf = Buffer.from(new Float32Array(vec).buffer);
                 this.db.prepare("INSERT OR REPLACE INTO kv_store (key, vector) VALUES (?, ?)").run(`diary_name:${name}`, vecBuf);
+                return vec; // 返回向量
             }
-        } catch (e) { console.error(`Failed to vectorize diary name ${name}`); }
+        } catch (e) {
+            console.error(`Failed to vectorize diary name ${name}`);
+        }
+        return null; // 失败时返回 null
     }
     
     // 兼容性 API: getVectorByText
